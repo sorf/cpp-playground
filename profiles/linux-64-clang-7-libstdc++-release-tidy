@@ -1,0 +1,5 @@
+include(linux-64-clang-7-libstdc++-release)
+[options]
+cpp_playground:clang_tidy=True
+[env]
+CLANG_TIDY=/usr/bin/clang-tidy-7
