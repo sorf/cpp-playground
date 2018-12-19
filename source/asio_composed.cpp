@@ -2,8 +2,8 @@
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/io_context_strand.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/format.hpp>
 #include <boost/predef.h>
@@ -18,6 +18,9 @@
 #include <thread>
 
 namespace asio = boost::asio;
+
+namespace {
+
 using error_code = boost::system::error_code;
 
 // A composed operations that runs many timer wait operations both in parallel and in series.
@@ -172,6 +175,7 @@ void test_callback(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
     auto user_resource = std::make_unique<bool>(true);
     std::cout << "[callback] Timers start" << std::endl;
+
     async_many_timers(io_context, *user_resource, run_duration, [&user_resource](error_code const &error) {
         *user_resource = false;
         user_resource.reset();
@@ -198,7 +202,8 @@ void test_callback_strand(std::chrono::steady_clock::duration run_duration) {
 
     auto user_resource = std::make_unique<bool>(true);
     std::cout << "[callback_strand] Timers start" << std::endl;
-    asio::io_context::strand strand_timers(io_context);
+    asio::strand<asio::io_context::executor_type> strand_timers(io_context.get_executor());
+
     async_many_timers(io_context, *user_resource, run_duration,
                       asio::bind_executor(strand_timers, [&user_resource](error_code const &error) {
                           *user_resource = false;
@@ -239,47 +244,13 @@ void test_future(std::chrono::steady_clock::duration run_duration) {
     thread_wait_future.join();
 }
 
-void test_future_strand(std::chrono::steady_clock::duration run_duration) {
-    asio::io_context io_context;
-    auto io_work = asio::make_work_guard(io_context.get_executor());
-    std::vector<std::thread> threads;
-    int thread_count = 25;
-    threads.reserve(thread_count);
-    for (int i = 0; i < thread_count; ++i) {
-        threads.emplace_back([&io_context] { io_context.run(); });
-    }
+} // namespace
 
-    auto user_resource = std::make_unique<bool>(true);
-    std::cout << "[future_strand] Timers start" << std::endl;
-    asio::io_context::strand strand_timers(io_context);
-    std::future<void> f = async_many_timers(io_context, *user_resource, run_duration, asio::use_future);
-    //                                      TODO(sorf):    How to add strand_timers here ^^^ ?
-    try {
-        f.get();
-        *user_resource = false;
-        user_resource.reset();
-
-        std::cout << "[future_strand] Timers done" << std::endl;
-    } catch (std::exception const &e) {
-        std::cout << "[future_strand] Timers error: " << e.what() << std::endl;
-    }
-
-    io_work.reset();
-    for (auto &t : threads) {
-        t.join();
-    }
-}
 int main() {
     try {
         test_callback(std::chrono::seconds(1));
         test_callback_strand(std::chrono::seconds(1));
         test_future(std::chrono::seconds(1));
-        // Uncomment to run the strand + future test.
-        // Currently it fails (asserts) as internal operations of the composed operation get to be executed in parallel
-        // in different threads.
-#if 0
-        test_future_strand(std::chrono::seconds(1));
-#endif
     } catch (std::exception const &e) {
         std::cout << "Error: " << e.what() << "\n";
     }

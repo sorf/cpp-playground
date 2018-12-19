@@ -28,8 +28,8 @@ function(define_test_executable test_name sources)
 endfunction(define_test_executable)
 
 
-set(TESTS 
-    asio_composed; asio_composed_v2)
+set(TESTS
+    asio_composed)
 foreach(test_name ${TESTS})
     define_test_executable(${test_name} ${test_name}.cpp)
 endforeach(test_name)
