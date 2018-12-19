@@ -253,7 +253,7 @@ void test_future_strand(std::chrono::steady_clock::duration run_duration) {
     std::cout << "[future_strand] Timers start" << std::endl;
     asio::io_context::strand strand_timers(io_context);
     std::future<void> f = async_many_timers(io_context, *user_resource, run_duration, asio::use_future);
-    //                                      TODO:      How to add strand_timers here ^^^ ?
+    //                                      TODO(sorf):    How to add strand_timers here ^^^ ?
     try {
         f.get();
         *user_resource = false;
