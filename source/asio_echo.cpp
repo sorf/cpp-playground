@@ -33,7 +33,7 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
     struct internal_state {
         explicit internal_state(StreamSocket &socket, completion_handler_type &&user_completion_handler)
             : socket(socket), user_completion_handler(std::move(user_completion_handler)),
-              echo_buffer(128 /*TODO: Use handler allocator*/) {}
+              io_work{asio::make_work_guard(socket.get_executor())}, echo_buffer(128 /*TODO: Use handler allocator*/) {}
         internal_state(internal_state const &) = delete;
         internal_state(internal_state &&) = default;
         internal_state &operator=(internal_state const &) = delete;
@@ -54,15 +54,21 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
                                 write_buffer,
                                 asio::bind_executor(
                                     self.get_executor(),
-                                    [self = std::move(self), bytes](error_code ec, std::size_t) {
-                                        self.user_completion_handler(ec, bytes);
+                                    [self = std::move(self), bytes](error_code ec, std::size_t) mutable {
+                                        self.call_handler(ec, bytes);
                                     }));
                         } else {
-                            self.user_completion_handler(ec, bytes);
+                            self.call_handler(ec, bytes);
                         }
                     }));
         }
         // clang-format on
+
+        void call_handler(error_code ec, std::size_t bytes) {
+            io_work.reset();
+            // TODO: Deallocate the echo_buffer (especially when using the handler allocator)
+            user_completion_handler(ec, bytes);
+        }
 
         using executor_type =
             asio::associated_executor_t<completion_handler_type, typename StreamSocket::executor_type>;
@@ -77,6 +83,7 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
 
         StreamSocket &socket;
         completion_handler_type user_completion_handler;
+        asio::executor_work_guard<typename StreamSocket::executor_type> io_work;
         std::vector<char> echo_buffer;
     };
 
