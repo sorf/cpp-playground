@@ -1,7 +1,13 @@
 #include <boost/asio/async_result.hpp>
+#include <boost/asio/bind_executor.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/beast/core/handler_ptr.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/read.hpp>
+#include <boost/asio/write.hpp>
 #include <boost/beast/core/type_traits.hpp>
+#include <iostream>
+#include <vector>
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -22,35 +28,91 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
     using completion_type = asio::async_completion<CompletionToken, completion_handler_sig>;
     using completion_handler_type = typename completion_type::completion_handler_type;
 
-    template <typename Handler> struct internal_state {
-        explicit state(Handler const &handler) : handler{handler} {}
-        state(state const &) = delete;
-        state(state &&) = delete;
-        state &operator=(state const &) = delete;
-        state &operator=(state &&) = delete;
+    struct internal_state {
+        explicit internal_state(StreamSocket &socket, completion_handler_type &&user_completion_handler)
+            : socket(socket), user_completion_handler(std::move(user_completion_handler)),
+              echo_buffer(128 /*TODO: Use handler allocator*/) {}
+        internal_state(internal_state const &) = delete;
+        internal_state(internal_state &&) = default;
+        internal_state &operator=(internal_state const &) = delete;
+        internal_state &operator=(internal_state &&) = default;
 
-        Handler const &handler;
-    };
+        // clang-format off
+        static void async_echo(internal_state&& self) {
+            auto read_buffer = asio::buffer(self.echo_buffer);
+            self.socket.async_read_some(
+                read_buffer,
+                asio::bind_executor(
+                    self.get_executor(),
+                    [self = std::move(self)](error_code ec, std::size_t bytes) mutable {
+                        if (!ec) {
+                            auto write_buffer = asio::buffer(self.echo_buffer.data(), bytes);
+                            asio::async_write(
+                                self.socket,
+                                write_buffer,
+                                asio::bind_executor(
+                                    self.get_executor(),
+                                    [self = std::move(self), bytes](error_code ec, std::size_t) {
+                                        self.user_completion_handler(ec, bytes);
+                                    }));
+                        } else {
+                            self.user_completion_handler(ec, bytes);
+                        }
+                    }));
+        }
+        // clang-format on
 
-    template <typename Handler> struct async_state {
-        template <typename DeducedHandler>
-        explicit async_state(DeducedHandler &&handler) : state(std::forward<DeducedHandler>(handle)) {}
-        async_state(async_state const &) = delete;
-        async_state(async_state &&) = default;
-        async_state &operator=(async_state const &) = delete;
-        async_state &operator=(async_state &&) = delete;
+        using executor_type =
+            asio::associated_executor_t<completion_handler_type, typename StreamSocket::executor_type>;
+        executor_type get_executor() const noexcept {
+            return asio::get_associated_executor(user_completion_handler, socket.get_executor());
+        }
 
-        beast::handler_ptr<internal_state, Handler> state;
+        using allocator_type = asio::associated_allocator_t<completion_handler_type, std::allocator<void>>;
+        allocator_type get_allocator() const noexcept {
+            return asio::get_associated_allocator(user_completion_handler, std::allocator<void>{});
+        }
+
+        StreamSocket &socket;
+        completion_handler_type user_completion_handler;
+        std::vector<char> echo_buffer;
     };
 
     static_assert(beast::is_async_stream<StreamSocket>::value, "AsyncStream requirements not met");
 
     completion_type completion(token);
-    // std::make_shared<internal_state>(io_context, user_resource, std::move(completion.completion_handler))
-    //    ->start_many_waits(run_duration);
+    internal_state::async_echo(internal_state(socket, std::move(completion.completion_handler)));
     return completion.result.get();
 }
 
 } // namespace
 
-int main(void) { return 0; }
+int main(int argc, char **argv) {
+    if (argc != 3) {
+        std::cerr << "Usage: echo-op <address> <port>\n"
+                  << "Example:\n"
+                  << "    echo-op 0.0.0.0 8080\n";
+        return EXIT_FAILURE;
+    }
+    auto const address{asio::ip::make_address(argv[1])};
+    auto const port{static_cast<unsigned short>(std::atoi(argv[2]))};
+
+    asio::io_context io_context;
+    asio::ip::tcp::socket socket{io_context};
+    asio::ip::tcp::acceptor acceptor{io_context};
+    asio::ip::tcp::endpoint ep{address, port};
+    acceptor.open(ep.protocol());
+    acceptor.set_option(asio::socket_base::reuse_address(true));
+    acceptor.bind(ep);
+    acceptor.listen();
+    acceptor.accept(socket);
+    async_echo_rw(socket, [&](error_code ec, std::size_t bytes) {
+        if (ec) {
+            std::cerr << argv[0] << ": " << ec.message() << std::endl;
+        } else {
+            std::cout << argv[0] << ": transferred: " << bytes << std::endl;
+        }
+    });
+    io_context.run();
+    return 0;
+}
