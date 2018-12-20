@@ -6,6 +6,7 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core/type_traits.hpp>
+#include <boost/predef.h>
 #include <iostream>
 #include <vector>
 
@@ -16,11 +17,9 @@ namespace {
 
 using error_code = boost::system::error_code;
 
-// A composed operations that reads a message from a socket stream and writes it back.
-// It is based on:
+// A composed operations that reads a message from a socket stream and writes it back. It is based on:
 // https://github.com/chriskohlhoff/asio/blob/master/asio/src/examples/cpp11/operations/composed_5.cpp
 // https://github.com/boostorg/beast/blob/develop/example/echo-op/echo_op.cpp
-//
 // but attempts an implementation that uses lambda expressions for the internal completion handlers.
 template <typename StreamSocket, typename CompletionToken>
 auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
@@ -32,12 +31,15 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
 
     struct internal_state {
         explicit internal_state(StreamSocket &socket, completion_handler_type &&user_completion_handler)
-            : socket(socket), user_completion_handler(std::move(user_completion_handler)),
-              io_work{asio::make_work_guard(socket.get_executor())}, echo_buffer(128 /*TODO: Use handler allocator*/) {}
+            : socket(socket),
+              user_completion_handler(std::move(user_completion_handler)), io_work{asio::make_work_guard(
+                                                                               socket.get_executor())},
+              echo_buffer(128 /*TODO(sorf): Use handler allocator*/) {}
         internal_state(internal_state const &) = delete;
-        internal_state(internal_state &&) = default;
+        internal_state(internal_state &&) = default; // NOLINT
         internal_state &operator=(internal_state const &) = delete;
-        internal_state &operator=(internal_state &&) = default;
+        internal_state &operator=(internal_state &&) = default; // NOLINT
+        ~internal_state() = default;
 
         // clang-format off
         static void async_echo(internal_state&& self) {
@@ -66,10 +68,14 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
 
         void call_handler(error_code ec, std::size_t bytes) {
             io_work.reset();
-            // TODO: Deallocate the echo_buffer (especially when using the handler allocator)
+            // TODO(sorf): Deallocate the echo_buffer (especially when using the handler allocator)
             user_completion_handler(ec, bytes);
         }
 
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-local-typedefs"
+#endif
         using executor_type =
             asio::associated_executor_t<completion_handler_type, typename StreamSocket::executor_type>;
         executor_type get_executor() const noexcept {
@@ -80,6 +86,9 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
         allocator_type get_allocator() const noexcept {
             return asio::get_associated_allocator(user_completion_handler, std::allocator<void>{});
         }
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic pop
+#endif
 
         StreamSocket &socket;
         completion_handler_type user_completion_handler;
@@ -103,25 +112,33 @@ int main(int argc, char **argv) {
                   << "    echo-op 0.0.0.0 8080\n";
         return EXIT_FAILURE;
     }
-    auto const address{asio::ip::make_address(argv[1])};
-    auto const port{static_cast<unsigned short>(std::atoi(argv[2]))};
+    char const *arg_program = argv[0]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    char const *arg_address = argv[1]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    char const *arg_port = argv[2];    // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
-    asio::io_context io_context;
-    asio::ip::tcp::socket socket{io_context};
-    asio::ip::tcp::acceptor acceptor{io_context};
-    asio::ip::tcp::endpoint ep{address, port};
-    acceptor.open(ep.protocol());
-    acceptor.set_option(asio::socket_base::reuse_address(true));
-    acceptor.bind(ep);
-    acceptor.listen();
-    acceptor.accept(socket);
-    async_echo_rw(socket, [&](error_code ec, std::size_t bytes) {
-        if (ec) {
-            std::cerr << argv[0] << ": " << ec.message() << std::endl;
-        } else {
-            std::cout << argv[0] << ": transferred: " << bytes << std::endl;
-        }
-    });
-    io_context.run();
+    try {
+        auto const address{asio::ip::make_address(arg_address)};
+        auto const port{static_cast<std::uint16_t>(std::strtol(arg_port, nullptr, 0))};
+
+        asio::io_context io_context;
+        asio::ip::tcp::socket socket{io_context};
+        asio::ip::tcp::acceptor acceptor{io_context};
+        asio::ip::tcp::endpoint ep{address, port};
+        acceptor.open(ep.protocol());
+        acceptor.set_option(asio::socket_base::reuse_address(true));
+        acceptor.bind(ep);
+        acceptor.listen();
+        acceptor.accept(socket);
+        async_echo_rw(socket, [&](error_code ec, std::size_t bytes) {
+            if (ec) {
+                std::cerr << arg_program << ": " << ec.message() << std::endl;
+            } else {
+                std::cout << arg_program << ": transferred: " << bytes << std::endl;
+            }
+        });
+        io_context.run();
+    } catch (std::exception const &e) {
+        std::cerr << arg_program << ": error: " << e.what() << std::endl;
+    }
     return 0;
 }
