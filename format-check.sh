@@ -35,7 +35,7 @@ for source_file in $SOURCE_FILES; do
 done
 
 if [ ! -z "$SOURCE_FILES_FAILED_CHECK" ]; then
-    echo -e "Files have failed the formatting check. Run 'bash format_fix.sh'"
+    echo -e "Files have failed the formatting check. Run 'bash format-fix.sh'"
     exit 1
 fi
 exit 0

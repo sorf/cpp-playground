@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.1)
 
 project(
-    dev_new
+    cpp_playground
     VERSION 0.1
     DESCRIPTION "C++ Playground"
     LANGUAGES CXX)
