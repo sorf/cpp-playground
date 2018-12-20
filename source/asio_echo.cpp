@@ -20,6 +20,8 @@ using error_code = boost::system::error_code;
 // It is based on:
 // https://github.com/chriskohlhoff/asio/blob/master/asio/src/examples/cpp11/operations/composed_5.cpp
 // https://github.com/boostorg/beast/blob/develop/example/echo-op/echo_op.cpp
+//
+// but attempts an implementation that uses lambda expressions for the internal completion handlers.
 template <typename StreamSocket, typename CompletionToken>
 auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
