@@ -83,7 +83,7 @@ class handler_memory {
             for (std::size_t i = 0; i < m_in_use.size(); ++i) {
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
                 if (!m_in_use[i]) {
-                    std::cout << boost::format("allocated[%d]: Size: %d") % i % size << std::endl;
+                    std::cout << boost::format("handler: allocated[%d]: size: %d") % i % size << std::endl;
 
                     m_in_use[i] = true; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
                     ptr = &m_storage[i]; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
@@ -93,6 +93,7 @@ class handler_memory {
         }
 
         if (ptr == nullptr) {
+            std::cout << boost::format("handler: global new: size: %d") % size << std::endl;
             ptr = ::operator new(size);
         }
 
@@ -104,7 +105,7 @@ class handler_memory {
             // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
             if (ptr == &m_storage[i]) {
                 try {
-                    std::cout << boost::format("deallocated[%d]") % i << std::endl;
+                    std::cout << boost::format("handler: deallocated[%d]") % i << std::endl;
                 } catch (...) {
                 }
 
@@ -117,10 +118,11 @@ class handler_memory {
     }
 
   private:
+    static std::size_t const storage_size = 4;
     // Storage
-    std::array<std::aligned_storage_t<1024>, 4> m_storage;
+    std::array<std::aligned_storage_t<1024>, storage_size> m_storage;
     // Usage flag for each storage slot.
-    std::array<bool, 4> m_in_use;
+    std::array<bool, storage_size> m_in_use;
 };
 
 // Minimal allocator for the handler based custom allocation.
