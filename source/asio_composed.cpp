@@ -9,6 +9,7 @@
 #include <boost/asio/strand.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/format.hpp>
+#include <boost/predef.h>
 #include <boost/range/irange.hpp>
 #include <boost/scope_exit.hpp>
 #include <cassert>
@@ -37,7 +38,14 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
     struct internal_op {
         using state_type =
             async_utils::async_state<void(error_code), CompletionToken, asio::io_context::executor_type, internal_op>;
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-local-typedefs"
+#endif
         using shared_state_type = std::shared_ptr<state_type>;
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic pop
+#endif
 
         internal_op(asio::io_context &io_context, bool &user_resource)
             : user_resource{user_resource}, run_timer{io_context}, is_open{false}, executing{false}, pending_async{} {
