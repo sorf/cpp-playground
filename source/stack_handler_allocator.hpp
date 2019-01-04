@@ -5,6 +5,11 @@
 #include <cstdlib>
 #include <new>
 
+#if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
+#include <boost/format.hpp>
+#include <iostream>
+#endif
+
 namespace async_utils {
 
 class stack_handler_memory_base {
@@ -32,6 +37,9 @@ class stack_handler_memory : public stack_handler_memory_base {
             for (std::size_t i = 0; i < m_in_use.size(); ++i) {
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
                 if (!m_in_use[i]) {
+#if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
+                    std::cout << boost::format("handler: allocated[%d]: size: %d") % i % size << std::endl;
+#endif
                     m_in_use[i] = true;  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
                     ptr = &m_storage[i]; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
                     break;
@@ -40,6 +48,9 @@ class stack_handler_memory : public stack_handler_memory_base {
         }
 
         if (ptr == nullptr) {
+#if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
+            std::cout << boost::format("handler: global new: size: %d") % size << std::endl;
+#endif
             ptr = ::operator new(size);
         }
 
@@ -50,6 +61,12 @@ class stack_handler_memory : public stack_handler_memory_base {
         for (std::size_t i = 0; i < m_storage.size(); ++i) {
             // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
             if (ptr == &m_storage[i]) {
+#if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
+                try {
+                    std::cout << boost::format("handler: deallocated[%d]") % i << std::endl;
+                } catch (...) {
+                }
+#endif
                 m_in_use[i] = false; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
                 ptr = nullptr;
                 break;
