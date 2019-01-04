@@ -9,6 +9,7 @@
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/scope_exit.hpp>
+#include <memory>
 
 namespace async_utils {
 namespace asio = boost::asio;
