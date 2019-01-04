@@ -1,7 +1,7 @@
 #include "async_state.hpp"
 #include "bind_allocator.hpp"
+#include "stack_handler_allocator.hpp"
 
-#include <array>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -67,105 +67,26 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     return completion.result.get();
 }
 
-// Manages the memory used for handler based custom allocation.
-class handler_memory {
-  public:
-    handler_memory() : m_storage{}, m_in_use{false} {}
-    handler_memory(handler_memory const &) = delete;
-    handler_memory(handler_memory &&) noexcept = delete;
-    handler_memory &operator=(handler_memory const &) = delete;
-    handler_memory &operator=(handler_memory &&) noexcept = delete;
-    ~handler_memory() = default;
-
-    void *allocate(std::size_t size) {
-        void *ptr = nullptr;
-        if (size > 0 && size < sizeof(m_storage[0])) {
-            for (std::size_t i = 0; i < m_in_use.size(); ++i) {
-                // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-                if (!m_in_use[i]) {
-                    std::cout << boost::format("handler: allocated[%d]: size: %d") % i % size << std::endl;
-
-                    m_in_use[i] = true; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
-                    ptr = &m_storage[i]; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
-                    break;
-                }
-            }
-        }
-
-        if (ptr == nullptr) {
-            std::cout << boost::format("handler: global new: size: %d") % size << std::endl;
-            ptr = ::operator new(size);
-        }
-
-        return ptr;
-    }
-
-    void deallocate(void *ptr) noexcept {
-        for (std::size_t i = 0; i < m_storage.size(); ++i) {
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-            if (ptr == &m_storage[i]) {
-                try {
-                    std::cout << boost::format("handler: deallocated[%d]") % i << std::endl;
-                } catch (...) {
-                }
-
-                m_in_use[i] = false; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
-                ptr = nullptr;
-                break;
-            }
-        }
-        ::operator delete(ptr); // no-op for nullptr
-    }
-
-  private:
-    static std::size_t const storage_size = 4;
-    // Storage
-    std::array<std::aligned_storage_t<1024>, storage_size> m_storage;
-    // Usage flag for each storage slot.
-    std::array<bool, storage_size> m_in_use;
-};
-
-// Minimal allocator for the handler based custom allocation.
-template <typename T> struct handler_allocator {
-    using value_type = T;
-    explicit handler_allocator(handler_memory &storage) noexcept : m_storage{storage} {}
-    // NOLINTNEXTLINE(google-explicit-constructor,hicpp-explicit-conversions)
-    template <typename U> handler_allocator(handler_allocator<U> const &other) noexcept : m_storage{other.m_storage} {}
-
-    template <typename U> bool operator==(handler_allocator<U> const &other) const noexcept {
-        return &m_storage == other.m_storage;
-    }
-    template <typename U> bool operator!=(handler_allocator<U> const &other) const noexcept {
-        return &m_storage != other.m_storage;
-    }
-
-    T *allocate(std::size_t count) const { return static_cast<T *>(m_storage.allocate(count * sizeof(T))); }
-    void deallocate(T *const ptr, std::size_t /*unused*/) const noexcept { m_storage.deallocate(ptr); }
-
-  private:
-    template <typename> friend struct handler_allocator;
-    handler_memory &m_storage;
-};
-
 void test_callback(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
-    handler_memory storage;
+    async_utils::stack_handler_memory handler_memory;
     std::cout << "[callback] Timers start" << std::endl;
     async_one_timer(io_context, run_duration,
-                    async_utils::bind_allocator(handler_allocator<char>(storage), [](error_code const &error) {
-                        if (error) {
-                            std::cout << "[callback] Timers error: " << error.message() << std::endl;
-                        } else {
-                            std::cout << "[callback] Timers done" << std::endl;
-                        }
-                    }));
+                    async_utils::bind_allocator(
+                        async_utils::stack_handler_allocator<void>(handler_memory), [](error_code const &error) {
+                            if (error) {
+                                std::cout << "[callback] Timers error: " << error.message() << std::endl;
+                            } else {
+                                std::cout << "[callback] Timers done" << std::endl;
+                            }
+                        }));
 
     io_context.run();
 }
 
 void test_callback_strand(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
-    handler_memory storage;
+    async_utils::stack_handler_memory handler_memory;
     auto io_work = asio::make_work_guard(io_context.get_executor());
     std::vector<std::thread> threads;
     int thread_count = 25;
@@ -179,14 +100,15 @@ void test_callback_strand(std::chrono::steady_clock::duration run_duration) {
 
     async_one_timer(
         io_context, run_duration,
-        asio::bind_executor(strand_timers,
-                            async_utils::bind_allocator(handler_allocator<char>(storage), [](error_code const &error) {
-                                if (error) {
-                                    std::cout << "[callback_strand] Timers error: " << error.message() << std::endl;
-                                } else {
-                                    std::cout << "[callback_strand] Timers done" << std::endl;
-                                }
-                            })));
+        asio::bind_executor(
+            strand_timers, async_utils::bind_allocator(
+                               async_utils::stack_handler_allocator<void>(handler_memory), [](error_code const &error) {
+                                   if (error) {
+                                       std::cout << "[callback_strand] Timers error: " << error.message() << std::endl;
+                                   } else {
+                                       std::cout << "[callback_strand] Timers done" << std::endl;
+                                   }
+                               })));
 
     io_work.reset();
     io_context.run();
