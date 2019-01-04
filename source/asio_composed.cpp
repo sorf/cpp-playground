@@ -1,3 +1,6 @@
+//#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
+//#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
+
 #include "async_state.hpp"
 #include "bind_allocator.hpp"
 #include "stack_handler_allocator.hpp"
@@ -149,14 +152,21 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
     typename internal_op::state_type::completion_type completion(token);
     auto state = std::make_shared<typename internal_op::state_type>(
         std::move(completion.completion_handler), io_context.get_executor(), io_context, user_resource);
-    auto *op = state->get();
-    op->start_many_waits(std::move(state), run_duration);
+
+    // When initiating internal operations to run in parallel, the initiation logic needs to be executed through the
+    // final completion handler executor
+    // (i.e. run the initiation through the same strand that will run the internal completion handlers)
+    io_context.post(state->wrap()([=, state = std::move(state)]() mutable {
+        auto *op = state->get();
+        op->start_many_waits(std::move(state), run_duration);
+    }));
+
     return completion.result.get();
 }
 
 void test_callback(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
-    async_utils::stack_handler_memory handler_memory;
+    async_utils::stack_handler_memory<32> handler_memory;
     auto user_resource = std::make_unique<bool>(true);
     std::cout << "[callback] Timers start" << std::endl;
 
@@ -179,7 +189,7 @@ void test_callback(std::chrono::steady_clock::duration run_duration) {
 
 void test_callback_strand(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
-    async_utils::stack_handler_memory handler_memory;
+    async_utils::stack_handler_memory<32> handler_memory;
     auto io_work = asio::make_work_guard(io_context.get_executor());
     std::vector<std::thread> threads;
     int thread_count = 25;
