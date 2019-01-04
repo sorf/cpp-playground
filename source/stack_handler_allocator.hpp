@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <mutex>
 #include <new>
 
 #if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
@@ -32,6 +33,7 @@ class stack_handler_memory : public stack_handler_memory_base {
     ~stack_handler_memory() = default;
 
     void *allocate(std::size_t size) final {
+        lock_guard lock(m_mutex);
         void *ptr = nullptr;
         if (size > 0 && size < sizeof(m_storage[0])) {
             for (std::size_t i = 0; i < m_in_use.size(); ++i) {
@@ -58,6 +60,7 @@ class stack_handler_memory : public stack_handler_memory_base {
     }
 
     void deallocate(void *ptr) noexcept final {
+        lock_guard lock(m_mutex);
         for (std::size_t i = 0; i < m_storage.size(); ++i) {
             // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
             if (ptr == &m_storage[i]) {
@@ -80,11 +83,13 @@ class stack_handler_memory : public stack_handler_memory_base {
     std::array<std::aligned_storage_t<storage_size>, storage_count> m_storage;
     // Usage flag for each storage slot.
     std::array<bool, storage_count> m_in_use;
+
+    using lock_guard = std::lock_guard<std::mutex>;
+    std::mutex m_mutex;
 };
 
 // A basic allocator that allocates from a fixed number of storage slots each of a fixed size.
 // Once all the slots are used, any additional allocation is delegated to the global heap.
-// The allocator is not thread safe.
 template <typename T> struct stack_handler_allocator {
     using value_type = T;
     explicit stack_handler_allocator(stack_handler_memory_base &storage) noexcept : m_storage{storage} {}
