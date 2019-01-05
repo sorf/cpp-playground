@@ -5,7 +5,6 @@
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/strand.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/format.hpp>
 #include <chrono>
@@ -82,39 +81,6 @@ void test_callback(std::chrono::steady_clock::duration run_duration) {
     io_context.run();
 }
 
-void test_callback_strand(std::chrono::steady_clock::duration run_duration) {
-    asio::io_context io_context;
-    async_utils::stack_handler_memory handler_memory;
-    auto io_work = asio::make_work_guard(io_context.get_executor());
-    std::vector<std::thread> threads;
-    int thread_count = 25;
-    threads.reserve(thread_count);
-    for (int i = 0; i < thread_count; ++i) {
-        threads.emplace_back([&io_context] { io_context.run(); });
-    }
-
-    std::cout << "[callback_strand] Timers start" << std::endl;
-    asio::strand<asio::io_context::executor_type> strand_timers(io_context.get_executor());
-
-    async_one_timer(
-        io_context, run_duration,
-        asio::bind_executor(
-            strand_timers, async_utils::bind_allocator(
-                               async_utils::stack_handler_allocator<void>(handler_memory), [](error_code const &error) {
-                                   if (error) {
-                                       std::cout << "[callback_strand] Timers error: " << error.message() << std::endl;
-                                   } else {
-                                       std::cout << "[callback_strand] Timers done" << std::endl;
-                                   }
-                               })));
-
-    io_work.reset();
-    io_context.run();
-    for (auto &t : threads) {
-        t.join();
-    }
-}
-
 void test_future(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
     std::cout << "[future] Timers start" << std::endl;
@@ -137,7 +103,6 @@ void test_future(std::chrono::steady_clock::duration run_duration) {
 int main() {
     try {
         test_callback(std::chrono::seconds(1));
-        test_callback_strand(std::chrono::seconds(1));
         test_future(std::chrono::seconds(1));
     } catch (std::exception const &e) {
         std::cout << "Error: " << e.what() << "\n";
