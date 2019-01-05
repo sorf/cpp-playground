@@ -14,6 +14,13 @@
 namespace async_utils {
 namespace asio = boost::asio;
 
+template <typename CompletionHandlerSignature, typename CompletionToken, typename Executor, typename StateData>
+class async_state;
+
+template <typename CompletionHandlerSignature, typename CompletionToken, typename Executor, typename StateData>
+using shared_async_state =
+    std::shared_ptr<async_state<CompletionHandlerSignature, CompletionToken, Executor, StateData>>;
+
 // Container of the state data associated with asychronous operations.
 // It holds the final operation completion handler, an executor to be used as a default if the final completion handler
 // doesn't have any associated with it and any other state data used by the implementation of the asychronous operation.
@@ -141,6 +148,17 @@ class async_state {
 
     state_holder_ptr m_state;
 };
+
+// Creates a shared_async_state object.
+template <typename SharedAsyncState, typename Executor, class... Args>
+decltype(auto)
+make_shared_async_state(typename SharedAsyncState::element_type::completion_handler_type &&completion_handler,
+                        Executor &&executor, Args &&... args) {
+    auto allocator = asio::get_associated_allocator(completion_handler,
+                                                    typename SharedAsyncState::element_type::default_allocator{});
+    return std::allocate_shared<typename SharedAsyncState::element_type>(
+        allocator, std::move(completion_handler), std::forward<Executor>(executor), std::forward<Args>(args)...);
+}
 
 template <typename CompletionHandlerSignature, typename CompletionToken, typename Executor, typename StateData>
 template <class... Args>

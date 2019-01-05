@@ -42,16 +42,8 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code)>::return_type {
 
     struct internal_op {
-        using state_type =
-            async_utils::async_state<void(error_code), CompletionToken, asio::io_context::executor_type, internal_op>;
-#if BOOST_COMP_CLANG
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-local-typedefs"
-#endif
-        using shared_state_type = std::shared_ptr<state_type>;
-#if BOOST_COMP_CLANG
-#pragma clang diagnostic pop
-#endif
+        using shared_state_type = async_utils::shared_async_state<void(error_code), CompletionToken,
+                                                                  asio::io_context::executor_type, internal_op>;
 
         internal_op(asio::io_context &io_context, bool &user_resource)
             : user_resource{user_resource}, run_timer{io_context}, is_open{false}, executing{false}, pending_async{} {
@@ -152,10 +144,9 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
         std::size_t pending_async;
     };
 
-    typename internal_op::state_type::completion_type completion(token);
-    auto state = std::make_shared<typename internal_op::state_type>(
+    typename internal_op::shared_state_type::element_type::completion_type completion(token);
+    auto state = async_utils::make_shared_async_state<typename internal_op::shared_state_type>(
         std::move(completion.completion_handler), io_context.get_executor(), io_context, user_resource);
-
     auto *op = state->get();
     op->start_many_waits(std::move(state), run_duration);
     return completion.result.get();
