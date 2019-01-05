@@ -33,6 +33,9 @@ using error_code = boost::system::error_code;
 // completes.This way we test that all the internal operations happen only as part of this user called composed
 // operation - no internal operation should execute once the completion callback of the composed operation has been
 // called (or scheduled to be called).
+//
+// The caller is responsible for ensuring that the this call and all the internal operations are running from the same
+// implicit or explicit strand.
 template <typename CompletionToken>
 auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                        std::chrono::steady_clock::duration run_duration, CompletionToken &&token) ->
@@ -153,36 +156,30 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
     auto state = std::make_shared<typename internal_op::state_type>(
         std::move(completion.completion_handler), io_context.get_executor(), io_context, user_resource);
 
-    // When initiating internal operations to run in parallel, the initiation logic needs to be executed through the
-    // final completion handler executor
-    // (i.e. run the initiation through the same strand that will run the internal completion handlers)
-    io_context.post(state->wrap()([=, state = std::move(state)]() mutable {
-        auto *op = state->get();
-        op->start_many_waits(std::move(state), run_duration);
-    }));
-
+    auto *op = state->get();
+    op->start_many_waits(std::move(state), run_duration);
     return completion.result.get();
 }
 
 void test_callback(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
     async_utils::stack_handler_memory<32> handler_memory;
+    async_utils::stack_handler_allocator<void> handler_allocator(handler_memory);
+
     auto user_resource = std::make_unique<bool>(true);
     std::cout << "[callback] Timers start" << std::endl;
 
     async_many_timers(io_context, *user_resource, run_duration,
-                      async_utils::bind_allocator(async_utils::stack_handler_allocator<void>(handler_memory),
-                                                  [&user_resource](error_code const &error) {
-                                                      *user_resource = false;
-                                                      user_resource.reset();
+                      async_utils::bind_allocator(handler_allocator, [&user_resource](error_code const &error) mutable {
+                          *user_resource = false;
+                          user_resource.reset();
 
-                                                      if (error) {
-                                                          std::cout << "[callback] Timers error: " << error.message()
-                                                                    << std::endl;
-                                                      } else {
-                                                          std::cout << "[callback] Timers done" << std::endl;
-                                                      }
-                                                  }));
+                          if (error) {
+                              std::cout << "[callback] Timers error: " << error.message() << std::endl;
+                          } else {
+                              std::cout << "[callback] Timers done" << std::endl;
+                          }
+                      }));
 
     io_context.run();
 }
@@ -190,6 +187,8 @@ void test_callback(std::chrono::steady_clock::duration run_duration) {
 void test_callback_strand(std::chrono::steady_clock::duration run_duration) {
     asio::io_context io_context;
     async_utils::stack_handler_memory<32> handler_memory;
+    async_utils::stack_handler_allocator<void> handler_allocator(handler_memory);
+
     auto io_work = asio::make_work_guard(io_context.get_executor());
     std::vector<std::thread> threads;
     int thread_count = 25;
@@ -202,21 +201,25 @@ void test_callback_strand(std::chrono::steady_clock::duration run_duration) {
     std::cout << "[callback_strand] Timers start" << std::endl;
     asio::strand<asio::io_context::executor_type> strand_timers(io_context.get_executor());
 
-    async_many_timers(io_context, *user_resource, run_duration,
-                      asio::bind_executor(strand_timers, async_utils::bind_allocator(
-                                                             async_utils::stack_handler_allocator<void>(handler_memory),
-                                                             [&user_resource](error_code const &error) {
-                                                                 *user_resource = false;
-                                                                 user_resource.reset();
+    // The initiation of the async operation has to be executed in the strand.
+    strand_timers.dispatch(
+        [&]() {
+            async_many_timers(
+                io_context, *user_resource, run_duration,
+                asio::bind_executor(
+                    strand_timers,
+                    async_utils::bind_allocator(handler_allocator, [&user_resource](error_code const &error) {
+                        *user_resource = false;
+                        user_resource.reset();
 
-                                                                 if (error) {
-                                                                     std::cout << "[callback_strand] Timers error: "
-                                                                               << error.message() << std::endl;
-                                                                 } else {
-                                                                     std::cout << "[callback_strand] Timers done"
-                                                                               << std::endl;
-                                                                 }
-                                                             })));
+                        if (error) {
+                            std::cout << "[callback_strand] Timers error: " << error.message() << std::endl;
+                        } else {
+                            std::cout << "[callback_strand] Timers done" << std::endl;
+                        }
+                    })));
+        },
+        handler_allocator);
 
     io_work.reset();
     io_context.run();

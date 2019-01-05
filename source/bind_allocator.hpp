@@ -31,9 +31,9 @@ template <typename T, typename Allocator> struct allocator_binder {
 
 // Associates an object of type T with an allocator.
 // Similar to boost::asio::bind_executor
-template <typename Allocator, typename T> inline decltype(auto) bind_allocator(Allocator &&allocator, T &&target) {
-    return allocator_binder<typename std::decay_t<T>, Allocator>(std::forward<T>(target),
-                                                                 std::forward<Allocator>(allocator));
+template <typename Allocator, typename T> inline decltype(auto) bind_allocator(Allocator const &allocator, T &&target) {
+    auto a = allocator;
+    return allocator_binder<typename std::decay_t<T>, Allocator>(std::forward<T>(target), std::move(a));
 }
 
 } // namespace async_utils
