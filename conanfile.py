@@ -19,11 +19,13 @@ class CppPlaygroundConan(ConanFile):
         if self.settings.compiler == "Visual Studio":
             cmake.definitions["CONAN_CXX_FLAGS"] += " /W4 /WX /D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS" +\
                                                     " /D_WIN32_WINNT=0x0A00" +\
-                                                    " /DBOOST_ASIO_STANDALONE"
+                                                    " /DBOOST_ASIO_STANDALONE /DBOOST_ASIO_NO_EXTENSIONS"
         elif self.settings.compiler == "gcc":
-            cmake.definitions["CONAN_CXX_FLAGS"] += " -Wall -Wextra -Werror -DBOOST_ASIO_STANDALONE"
+            cmake.definitions["CONAN_CXX_FLAGS"] += " -Wall -Wextra -Werror" +\
+                                                    " -DBOOST_ASIO_STANDALONE -DBOOST_ASIO_NO_EXTENSIONS"
         elif self.settings.compiler == "clang":
-            cmake.definitions["CONAN_CXX_FLAGS"] += " -Wall -Wextra -Werror -Wglobal-constructors -DBOOST_ASIO_STANDALONE"
+            cmake.definitions["CONAN_CXX_FLAGS"] += " -Wall -Wextra -Werror -Wglobal-constructors" +\
+                                                    " -DBOOST_ASIO_STANDALONE -DBOOST_ASIO_NO_EXTENSIONS"
 
         if not self.settings.os == "Windows":
             cmake.definitions["CONAN_CXX_FLAGS"] += " -pthread"

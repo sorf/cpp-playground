@@ -155,14 +155,13 @@ int main(int argc, char **argv) {
         auto const port{static_cast<std::uint16_t>(std::strtol(arg_port, nullptr, 0))};
 
         asio::io_context io_context;
-        asio::ip::tcp::socket socket{io_context};
         asio::ip::tcp::acceptor acceptor{io_context};
         asio::ip::tcp::endpoint ep{address, port};
         acceptor.open(ep.protocol());
         acceptor.set_option(asio::socket_base::reuse_address(true));
         acceptor.bind(ep);
         acceptor.listen();
-        acceptor.accept(socket);
+        auto socket = acceptor.accept();
         async_echo_rw(socket, [&](error_code ec, std::size_t bytes) {
             if (ec) {
                 std::cerr << arg_program << ": " << ec.message() << std::endl;
