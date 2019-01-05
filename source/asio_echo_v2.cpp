@@ -161,7 +161,11 @@ int main(int argc, char **argv) {
         acceptor.set_option(asio::socket_base::reuse_address(true));
         acceptor.bind(ep);
         acceptor.listen();
+#ifndef __clang_analyzer__
         auto socket = acceptor.accept();
+#else
+        asio::ip::tcp::socket socket{io_context};
+#endif
         async_echo_rw(socket, [&](error_code ec, std::size_t bytes) {
             if (ec) {
                 std::cerr << arg_program << ": " << ec.message() << std::endl;
