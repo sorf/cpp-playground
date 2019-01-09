@@ -33,27 +33,27 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     struct internal_op : base_type {
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
                     handler_type &&handler)
-            : base_type{io_context.get_executor(), std::move(handler)}, waits{},
+            : base_type{io_context.get_executor(), std::move(handler)},
               data{beast::allocate_stable<temporary_data>(*this, io_context, run_duration)} {
         }
 
         void start_one_wait() {
-            ++waits;
+            ++data.waits;
             data.internal_timer.expires_after(std::chrono::milliseconds{50});
             data.internal_timer.async_wait(std::move(*this));
         }
 
         void operator()(error_code ec) {
             if (!ec && std::chrono::steady_clock::now() < data.end_time) {
-                std::cout << boost::format("internal_op[waits=%d]: After one wait") % waits << std::endl;
+                std::cout << boost::format("internal_op[waits=%d]: After one wait") % data.waits << std::endl;
                 start_one_wait();
                 return;
             }
             // Operation complete here.
             if (!ec) {
-                std::cout << boost::format("internal_op[waits=%d]: Done") % waits << std::endl;
+                std::cout << boost::format("internal_op[waits=%d]: Done") % data.waits << std::endl;
             } else {
-                std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % waits % ec % ec.message()
+                std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % data.waits % ec % ec.message()
                           << std::endl;
             }
             this->invoke(ec);
@@ -61,12 +61,12 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
 
         struct temporary_data {
             temporary_data(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration)
-                : internal_timer{io_context}, end_time{std::chrono::steady_clock::now() + run_duration} {}
+                : internal_timer{io_context}, end_time{std::chrono::steady_clock::now() + run_duration}, waits{} {}
             asio::steady_timer internal_timer;
             std::chrono::steady_clock::time_point const end_time;
+            unsigned waits;
         };
 
-        unsigned waits;
         temporary_data &data;
     };
 
