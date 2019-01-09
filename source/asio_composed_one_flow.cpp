@@ -108,4 +108,5 @@ int main() {
     } catch (std::exception const &e) {
         std::cout << "Error: " << e.what() << "\n";
     }
+    return 0;
 }

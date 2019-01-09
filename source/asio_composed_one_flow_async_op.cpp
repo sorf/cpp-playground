@@ -33,9 +33,8 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     struct internal_op : base_type {
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
                     handler_type &&handler)
-            : base_type{io_context.get_executor(), std::move(handler)},
-              data{beast::allocate_stable<temporary_data>(*this, io_context, run_duration)} {
-        }
+            : base_type{io_context.get_executor(), std::move(handler)}, data{beast::allocate_stable<temporary_data>(
+                                                                            *this, io_context, run_duration)} {}
 
         void start_one_wait() {
             ++data.waits;
@@ -119,4 +118,5 @@ int main() {
     } catch (std::exception const &e) {
         std::cout << "Error: " << e.what() << "\n";
     }
+    return 0;
 }
