@@ -1,3 +1,4 @@
+#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 #include "async_state.hpp"
 #include "bind_allocator.hpp"
 #include "stack_handler_allocator.hpp"
@@ -26,29 +27,47 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code)>::return_type {
 
     auto ex = io_context.get_executor();
-    auto op = [internal_timer = asio::steady_timer{io_context},
-               end_time = std::chrono::steady_clock::now() + run_duration,
-               waits = 0](auto yield, error_code ec = {}) mutable {
-        if (!yield.is_continuation() || (!ec && std::chrono::steady_clock::now() < end_time)) {
-            if (yield.is_continuation()) {
-                std::cout << boost::format("internal_op[waits=%d]: After one wait") % waits << std::endl;
-            }
+    typename asio::async_completion<CompletionToken, void(error_code)> completion(token);
+
+    enum initiate_t {initiate};
+    struct internal_op  {
+        using handler_t = typename decltype(completion)::completion_handler_type;
+        using yield_t = compose::stable_yield_token_t<internal_op, decltype(ex), handler_t>;
+
+        internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration)
+            : internal_timer{io_context}, end_time{std::chrono::steady_clock::now() + run_duration}, waits{} {}
+
+        compose::upcall_guard start_one_wait(yield_t yield) {
             ++waits;
             internal_timer.expires_after(std::chrono::milliseconds{50});
             return internal_timer.async_wait(yield);
         }
 
-        // Operation complete here.
-        if (!ec) {
-            std::cout << boost::format("internal_op[waits=%d]: Done") % waits << std::endl;
-        } else {
-            std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % waits % ec % ec.message() << std::endl;
+        compose::upcall_guard operator()(yield_t yield, initiate_t) {
+            return start_one_wait(yield);
         }
-        return yield.direct_upcall(ec);
+
+        compose::upcall_guard operator()(yield_t yield, error_code ec) {
+            if (!ec && std::chrono::steady_clock::now() < end_time) {
+                std::cout << boost::format("internal_op[waits=%d]: After one wait") % waits << std::endl;
+                return start_one_wait(yield);
+            }
+            // Operation complete here.
+            if (!ec) {
+                std::cout << boost::format("internal_op[waits=%d]: Done") % waits << std::endl;
+            } else {
+                std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % waits % ec % ec.message()
+                          << std::endl;
+            }
+            return yield.direct_upcall(ec);
+        }
+
+        asio::steady_timer internal_timer;
+        std::chrono::steady_clock::time_point const end_time;
+        unsigned waits;
     };
 
-    typename asio::async_completion<CompletionToken, void(error_code)> completion(token);
-    compose::stable_transform(ex, completion, std::move(op)).run();
+    compose::stable_transform(ex, completion, internal_op{io_context, run_duration}).run(initiate);
     return completion.result.get();
 }
 
