@@ -147,7 +147,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
     typename internal_op::shared_state_type::element_type::completion_type completion(token);
     auto state = async_utils::make_shared_async_state<typename internal_op::shared_state_type>(
         std::move(completion.completion_handler), io_context.get_executor(), io_context, user_resource);
-    auto *op = state->get();
+    auto *op = state->get_data();
     op->start_many_waits(std::move(state), run_duration);
     return completion.result.get();
 }

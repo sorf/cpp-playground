@@ -35,7 +35,7 @@ auto async_echo_rw(StreamSocket &socket, CompletionToken &&token) ->
     typename state_type::completion_type completion(token);
 
     state_type state{std::move(completion.completion_handler), socket.get_executor(), socket, 128};
-    auto *data = state.get();
+    auto *data = state.get_data();
     data->socket.async_read_some(
         asio::buffer(data->echo_buffer),
         state.wrap()([=, state = std::move(state)](error_code ec, std::size_t bytes) mutable {

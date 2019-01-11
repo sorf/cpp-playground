@@ -54,22 +54,13 @@ class async_state {
     async_state &operator=(async_state &&) noexcept = default;
     ~async_state() = default;
 
+    // Checks if there is any state set.
+    bool has_data() const noexcept { return m_state != nullptr; }
+
     // Returns a pointer to the owned state data.
-    StateData *get() const {
+    StateData *get_data() const {
         BOOST_ASSERT(m_state);
         return m_state.get();
-    }
-
-    // Returns a pointer to the state data.
-    StateData &operator*() const {
-        BOOST_ASSERT(m_state);
-        return *m_state;
-    }
-
-    // Returns a reference to the state data.
-    StateData *operator->() const {
-        BOOST_ASSERT(m_state);
-        return m_state;
     }
 
     // Object returned by wrap() that allows adapting a (lambda) function object to be a proper completion handler.

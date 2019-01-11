@@ -60,7 +60,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     typename internal_op::state_type::completion_type completion(token);
     typename internal_op::state_type state{std::move(completion.completion_handler), io_context.get_executor(),
                                            io_context, run_duration};
-    auto *op = state.get();
+    auto *op = state.get_data();
     op->start_one_wait(std::move(state));
     return completion.result.get();
 }
