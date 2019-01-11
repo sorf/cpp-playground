@@ -1,12 +1,13 @@
 //#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
-#include "async_state.hpp"
 #include "bind_allocator.hpp"
+#include "shared_async_state.hpp"
 #include "stack_handler_allocator.hpp"
 
 #include <atomic>
 #include <boost/asio/async_result.hpp>
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
@@ -41,6 +42,9 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                        std::chrono::steady_clock::duration run_duration, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code)>::return_type {
 
+    using shared_state_type =
+        async_utils::shared_async_state<void(error_code), CompletionToken, asio::io_context::executor_type>;
+#if 0
     struct internal_op {
         using shared_state_type = async_utils::shared_async_state<void(error_code), CompletionToken,
                                                                   asio::io_context::executor_type, internal_op>;
@@ -143,12 +147,17 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
         std::atomic_bool executing;
         std::size_t pending_async;
     };
-
-    typename internal_op::shared_state_type::element_type::completion_type completion(token);
+#endif
+    assert(user_resource);
+    typename shared_state_type::completion_type completion(token);
+    [[maybe_unused]] shared_state_type state{std::move(completion.completion_handler), io_context.get_executor()};
+    (void)run_duration;
+#if 0
     auto state = async_utils::make_shared_async_state<typename internal_op::shared_state_type>(
         std::move(completion.completion_handler), io_context.get_executor(), io_context, user_resource);
     auto *op = state->get_data();
     op->start_many_waits(std::move(state), run_duration);
+#endif
     return completion.result.get();
 }
 
