@@ -29,8 +29,8 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     auto ex = io_context.get_executor();
     typename asio::async_completion<CompletionToken, void(error_code)> completion(token);
 
-    enum initiate_t {initiate};
-    struct internal_op  {
+    enum initiate_t { initiate };
+    struct internal_op {
         using handler_t = typename decltype(completion)::completion_handler_type;
         using yield_t = compose::stable_yield_token_t<internal_op, decltype(ex), handler_t>;
 
@@ -43,9 +43,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
             return internal_timer.async_wait(yield);
         }
 
-        compose::upcall_guard operator()(yield_t yield, initiate_t) {
-            return start_one_wait(yield);
-        }
+        compose::upcall_guard operator()(yield_t yield, initiate_t) { return start_one_wait(yield); }
 
         compose::upcall_guard operator()(yield_t yield, error_code ec) {
             if (!ec && std::chrono::steady_clock::now() < end_time) {
