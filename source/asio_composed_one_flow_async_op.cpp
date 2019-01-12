@@ -37,7 +37,6 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     using handler_type = typename asio::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
     using base_type = beast::stable_async_op_base<handler_type, asio::io_context::executor_type>;
     struct internal_op : base_type {
-        using base_type::invoke;
         state_data &data;
 
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
@@ -65,7 +64,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
                 std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % data.waits % ec % ec.message()
                           << std::endl;
             }
-            invoke(ec);
+            this->invoke(ec);
         }
     };
 

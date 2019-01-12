@@ -1,6 +1,5 @@
 #define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 #include "bind_allocator.hpp"
-#include "on_scope_exit.hpp"
 #include "shared_async_state.hpp"
 #include "stack_handler_allocator.hpp"
 
@@ -37,8 +36,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     using base_type =
         async_utils::shared_async_state<void(error_code), CompletionToken, asio::io_context::executor_type, state_data>;
     struct internal_op : base_type {
-        using base_type::invoke;
-        using base_type::wrap;
+        using base_type::invoke; // MSVC workaround ('this->invoke()` fails to compile in the lambda below)
         state_data &data;
 
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
@@ -51,7 +49,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
         void start_one_wait() {
             ++data.waits;
             data.internal_timer.expires_after(std::chrono::milliseconds{50});
-            data.internal_timer.async_wait(wrap([*this](error_code ec) mutable {
+            data.internal_timer.async_wait(this->wrap([*this](error_code ec) mutable {
                 if (!ec && std::chrono::steady_clock::now() < data.end_time) {
                     std::cout << boost::format("internal_op[waits=%d]: After one wait") % data.waits << std::endl;
                     return start_one_wait();
