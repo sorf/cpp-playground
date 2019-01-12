@@ -1,5 +1,4 @@
 #define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
-#include "async_state.hpp"
 #include "bind_allocator.hpp"
 #include "stack_handler_allocator.hpp"
 
@@ -8,6 +7,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/format.hpp>
+#include <boost/predef.h>
 #include <chrono>
 #include <compose/stable_transform.hpp>
 #include <iostream>
@@ -31,8 +31,15 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
 
     enum initiate_t { initiate };
     struct internal_op {
-        using handler_t = typename decltype(completion)::completion_handler_type;
-        using yield_t = compose::stable_yield_token_t<internal_op, decltype(ex), handler_t>;
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-local-typedefs"
+#endif
+        using yield_t = compose::stable_yield_token_t<internal_op, decltype(ex),
+                                                      typename decltype(completion)::completion_handler_type>;
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic pop
+#endif
 
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration)
             : internal_timer{io_context}, end_time{std::chrono::steady_clock::now() + run_duration}, waits{} {}
@@ -43,7 +50,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
             return internal_timer.async_wait(yield);
         }
 
-        compose::upcall_guard operator()(yield_t yield, initiate_t) { return start_one_wait(yield); }
+        compose::upcall_guard operator()(yield_t yield, initiate_t /*unused*/) { return start_one_wait(yield); }
 
         compose::upcall_guard operator()(yield_t yield, error_code ec) {
             if (!ec && std::chrono::steady_clock::now() < end_time) {

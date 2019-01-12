@@ -1,5 +1,4 @@
 #define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
-#include "async_state.hpp"
 #include "bind_allocator.hpp"
 #include "stack_handler_allocator.hpp"
 
@@ -27,14 +26,26 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
                      CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code)>::return_type {
 
+    struct state_data {
+        state_data(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration)
+            : internal_timer{io_context}, end_time{std::chrono::steady_clock::now() + run_duration}, waits{} {}
+        asio::steady_timer internal_timer;
+        std::chrono::steady_clock::time_point const end_time;
+        unsigned waits;
+    };
+
     using handler_type = typename asio::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
     using base_type = beast::stable_async_op_base<handler_type, asio::io_context::executor_type>;
-
     struct internal_op : base_type {
+        using base_type::invoke;
+        state_data &data;
+
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
                     handler_type &&handler)
-            : base_type{io_context.get_executor(), std::move(handler)}, data{beast::allocate_stable<temporary_data>(
-                                                                            *this, io_context, run_duration)} {}
+            : base_type{io_context.get_executor(), std::move(handler)}, data{beast::allocate_stable<state_data>(
+                                                                            *this, io_context, run_duration)} {
+            start_one_wait();
+        }
 
         void start_one_wait() {
             ++data.waits;
@@ -45,8 +56,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
         void operator()(error_code ec) {
             if (!ec && std::chrono::steady_clock::now() < data.end_time) {
                 std::cout << boost::format("internal_op[waits=%d]: After one wait") % data.waits << std::endl;
-                start_one_wait();
-                return;
+                return start_one_wait();
             }
             // Operation complete here.
             if (!ec) {
@@ -55,23 +65,12 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
                 std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % data.waits % ec % ec.message()
                           << std::endl;
             }
-            this->invoke(ec);
+            invoke(ec);
         }
-
-        struct temporary_data {
-            temporary_data(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration)
-                : internal_timer{io_context}, end_time{std::chrono::steady_clock::now() + run_duration}, waits{} {}
-            asio::steady_timer internal_timer;
-            std::chrono::steady_clock::time_point const end_time;
-            unsigned waits;
-        };
-
-        temporary_data &data;
     };
 
     typename asio::async_completion<CompletionToken, void(error_code)> completion(token);
     internal_op op{io_context, run_duration, std::move(completion.completion_handler)};
-    op.start_one_wait();
     return completion.result.get();
 }
 

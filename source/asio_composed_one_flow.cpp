@@ -1,6 +1,7 @@
 #define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
-#include "async_state.hpp"
 #include "bind_allocator.hpp"
+#include "on_scope_exit.hpp"
+#include "shared_async_state.hpp"
 #include "stack_handler_allocator.hpp"
 
 #include <boost/asio/async_result.hpp>
@@ -25,43 +26,50 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
                      CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code)>::return_type {
 
-    struct internal_op {
-        using state_type =
-            async_utils::async_state<void(error_code), CompletionToken, asio::io_context::executor_type, internal_op>;
-
-        internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration)
+    struct state_data {
+        state_data(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration)
             : internal_timer{io_context}, end_time{std::chrono::steady_clock::now() + run_duration}, waits{} {}
-
-        void start_one_wait(state_type &&state) {
-            internal_timer.expires_after(std::chrono::milliseconds{50});
-            internal_timer.async_wait(state.wrap()([this, state = std::move(state)](error_code ec) mutable {
-                ++waits;
-                if (!ec && std::chrono::steady_clock::now() < end_time) {
-                    std::cout << boost::format("internal_op[waits=%d]: After one wait") % waits << std::endl;
-                    start_one_wait(std::move(state));
-                    return;
-                }
-                // Operation complete here.
-                if (!ec) {
-                    std::cout << boost::format("internal_op[waits=%d]: Done") % waits << std::endl;
-                } else {
-                    std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % waits % ec % ec.message()
-                              << std::endl;
-                }
-                state.invoke(ec);
-            }));
-        }
-
         asio::steady_timer internal_timer;
         std::chrono::steady_clock::time_point const end_time;
         unsigned waits;
     };
 
-    typename internal_op::state_type::completion_type completion(token);
-    typename internal_op::state_type state{std::move(completion.completion_handler), io_context.get_executor(),
-                                           io_context, run_duration};
-    auto *op = state.get_data();
-    op->start_one_wait(std::move(state));
+    using base_type =
+        async_utils::shared_async_state<void(error_code), CompletionToken, asio::io_context::executor_type, state_data>;
+    struct internal_op : base_type {
+        using base_type::invoke;
+        using base_type::wrap;
+        state_data &data;
+
+        internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
+                    typename base_type::completion_handler_type &&completion_handler)
+            : base_type{io_context.get_executor(), std::move(completion_handler), io_context, run_duration},
+              data{base_type::get_data()} {
+            start_one_wait();
+        }
+
+        void start_one_wait() {
+            ++data.waits;
+            data.internal_timer.expires_after(std::chrono::milliseconds{50});
+            data.internal_timer.async_wait(wrap([*this](error_code ec) mutable {
+                if (!ec && std::chrono::steady_clock::now() < data.end_time) {
+                    std::cout << boost::format("internal_op[waits=%d]: After one wait") % data.waits << std::endl;
+                    return start_one_wait();
+                }
+                // Operation complete here.
+                if (!ec) {
+                    std::cout << boost::format("internal_op[waits=%d]: Done") % data.waits << std::endl;
+                } else {
+                    std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % data.waits % ec % ec.message()
+                              << std::endl;
+                }
+                invoke(ec);
+            }));
+        }
+    };
+
+    typename internal_op::completion_type completion(token);
+    internal_op op{io_context, run_duration, std::move(completion.completion_handler)};
     return completion.result.get();
 }
 
