@@ -81,7 +81,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
             assert(data.user_resource);
             assert(!data.executing);
             data.executing = true;
-            ON_SCOPE_EXIT([&]{ data.executing = false; }); // NOTE: This works because we copy this in the lambda below
+            ON_SCOPE_EXIT([&] { data.executing = false; }); // NOTE: This works because we copy this in the lambda below
 
             // Setting the total run duration.
             data.run_timer.expires_after(run_duration);
@@ -90,7 +90,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                     assert(data.user_resource);
                     assert(!data.executing);
                     data.executing = true;
-                    ON_SCOPE_EXIT([&]{ data.executing = false; });
+                    ON_SCOPE_EXIT([&] { data.executing = false; });
                     close(ec);
                 }
                 invoke_if_last_handler(); // Note: The executing flag accessed on-scope-exit has to be reset
@@ -113,7 +113,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                     assert(data.user_resource);
                     assert(!data.executing);
                     data.executing = true;
-                    ON_SCOPE_EXIT([&]{ data.executing = false; });
+                    ON_SCOPE_EXIT([&] { data.executing = false; });
 
                     if (data.is_open && !ec) {
                         return start_one_wait(timer_index, one_wait);
@@ -124,7 +124,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                         std::cout << boost::format("timer[%d]: wait closed") % timer_index << std::endl;
                     } else {
                         std::cout << boost::format("timer[%d]: wait error: %s:%s") % timer_index % ec % ec.message()
-                                << std::endl;
+                                  << std::endl;
                         close(ec);
                     }
                 }
