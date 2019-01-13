@@ -251,13 +251,15 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
     return completion.result.get();
 }
 
+using server_close_status = std::pair<error_code, std::size_t>;
+
 // Runs the echo server until CTRL-C.
+// The completing handler will receive a 'server_close_status'.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token) ->
-    typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
+    typename asio::async_result<std::decay_t<CompletionToken>, void(server_close_status)>::return_type {
 
-    using signature = void(error_code, std::size_t);
-
+    using signature = void(server_close_status);
     struct state_data {
         explicit state_data(Acceptor &acceptor)
             : acceptor{acceptor}, signals{acceptor.get_executor().context(), SIGINT},
@@ -311,7 +313,9 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
             error_code ignored;
             data.signals.cancel(ignored);
         }
-        void try_invoke() { this->try_invoke_move_args(data.user_completion_error, data.total_client_count); }
+        void try_invoke() {
+            this->try_invoke_move_args(std::make_pair(data.user_completion_error, data.total_client_count));
+        }
     };
 
     typename internal_op::completion_type completion(token);
@@ -341,13 +345,31 @@ int main(int argc, char **argv) {
         acceptor.bind(endpoint);
         acceptor.listen();
 
+        // We run the server in a thread-pool and we wait for completion with a future.
+        auto threads_io_work = asio::make_work_guard(io_context.get_executor());
+        std::vector<std::thread> threads;
+        unsigned thread_count = 1; // TODO(sorf): server is not safe to run in multiple threads
+        threads.reserve(thread_count);
+        for (unsigned i = 0; i < thread_count; ++i) {
+            threads.emplace_back([&io_context] { io_context.run(); });
+        }
+
         std::cout << boost::format("Server: Starting on: %1%") % endpoint << std::endl;
-        async_echo_server_until_ctrl_c(acceptor, [&](error_code ec, std::size_t client_count) {
+        std::future<server_close_status> f = async_echo_server_until_ctrl_c(acceptor, asio::use_future);
+        try {
+            auto status = f.get();
             std::cout << boost::format("Server: Stopped: clients: %2% (closing error: %3%:%4%)") % endpoint %
-                             client_count % ec % ec.message()
+                             status.second % status.first % status.first.message()
                       << std::endl;
-        });
-        io_context.run();
+        } catch (std::exception const &e) {
+            std::cout << "Server: Run error: " << e.what() << std::endl;
+        }
+
+        threads_io_work.reset();
+        for (auto &t : threads) {
+            t.join();
+        }
+
     } catch (std::exception const &e) {
         std::cerr << arg_program << ": Fatal error: " << e.what() << std::endl;
     }
