@@ -19,7 +19,7 @@ class CppPlaygroundConan(ConanFile):
         if self.settings.compiler == "Visual Studio":
             cmake.definitions["CONAN_CXX_FLAGS"] += " /W4 /WX /D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS" +\
                                                     " /experimental:external /external:anglebrackets /external:W0" +\
-                                                    " /D_WIN32_WINNT=0x0A00" +\
+                                                    " /D_WIN32_WINNT=0x0A00 /DWIN32_LEAN_AND_MEAN" +\
                                                     " /DBOOST_ALL_NO_LIB=1" +\
                                                     " /DBOOST_ASIO_STANDALONE /DBOOST_ASIO_NO_EXTENSIONS"
         elif self.settings.compiler == "gcc":

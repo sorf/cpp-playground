@@ -93,8 +93,8 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                     ON_SCOPE_EXIT([&] { data.executing = false; });
                     close(ec);
                 }
-                invoke_if_last_handler(); // Note: The executing flag accessed on-scope-exit has to be reset
-                                          // before we deallocate the state data and call the final handler
+                try_invoke(); // Note: The executing flag accessed on-scope-exit has to be reset
+                              // before we deallocate the state data and call the final handler
             }));
 
             // Starting the internal timers in parallel.
@@ -128,7 +128,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                         close(ec);
                     }
                 }
-                invoke_if_last_handler(); // Note: Same as above, invoke() after on-scope-exit has run
+                try_invoke(); // Note: Same as above, invoke() after on-scope-exit has run
             }));
         }
 
@@ -145,12 +145,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
             std::cout << "timers cancelled" << std::endl;
         }
 
-        void invoke_if_last_handler() {
-            if (this->unique()) {
-                auto ec = data.user_completion_error; // anything used in invoke needs to not be in state data anymore
-                this->invoke(ec);
-            }
-        }
+        void try_invoke() { this->try_invoke_move_args(data.user_completion_error); }
     };
 
     typename internal_op::completion_type completion(token);
@@ -256,4 +251,5 @@ int main() {
     } catch (std::exception const &e) {
         std::cout << "Error: " << e.what() << "\n";
     }
+    return 0;
 }
