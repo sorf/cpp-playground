@@ -81,7 +81,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
             assert(data.user_resource);
             assert(!data.executing);
             data.executing = true;
-            ON_SCOPE_EXIT([&] { data.executing = false; }); // NOTE: This works because we copy this in the lambda below
+            ON_SCOPE_EXIT([&] { data.executing = false; }); // NOTE: This works because we copy 'this' in the lambda
 
             // Setting the total run duration.
             data.run_timer.expires_after(run_duration);
