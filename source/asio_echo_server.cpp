@@ -29,9 +29,12 @@
 namespace asio = boost::asio;
 using error_code = boost::system::error_code;
 
-// Helper base class to add a 'continue_handler' method in derived asynchronous operation implementation classes.
+// Helper base class to add a 'continue_handler' method in derived classes.
 template <class Derived> struct add_continue_handler {
 
+    // Tests if am intermediary completion handler should continue its execution.
+    // It shouldn't if the intermediary operation has failed or if the composed operation has been closed.
+    // In this case the final completion handler is called, if this is the last instance sharing the state owernship.
     bool continue_handler(error_code ec) {
         auto *pthis = static_cast<Derived *>(this);
         if (pthis->is_open() && !ec) {
@@ -46,9 +49,9 @@ template <class Derived> struct add_continue_handler {
     }
 };
 
-// Continuously write on a socket what was read last, until the async_wait on the cancel timer returns.
+// Continuously write on a socket what was read last, until async_wait() on the close timer returns.
 // The completion handler will receive the error that led to the connection being closed and
-// the total number of bytes that were sent to the client.
+// the total number of bytes that were written on the socket.
 template <typename StreamSocket, typename CompletionToken>
 auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
