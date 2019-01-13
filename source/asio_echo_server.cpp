@@ -42,7 +42,8 @@ template <class Derived> struct enable_continue_handler {
 
     // Tests if am intermediary completion handler should continue its execution.
     // It shouldn't if the intermediary operation has failed or if the composed operation has been closed.
-    // In this case the final completion handler is called, if this is the last instance sharing the state owernship.
+    // In these cases, the final completion handler is attempted to be called - will be called only when
+    // this is the last instance sharing the ownership of the composed operation state.
     bool continue_handler(error_code ec) {
         auto *pthis = static_cast<Derived *>(this);
         if (pthis->is_open() && !ec) {
