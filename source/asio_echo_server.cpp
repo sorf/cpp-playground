@@ -173,11 +173,11 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
             : base_type{socket.get_executor(), std::move(completion_handler), socket, close_timer, allocator},
               data{base_type::get_data()} {
 
-            // Waiting for the signal to close this (with either the async_wait error or operation_aborted)
+            // Waiting for the signal to close this
             data.close_timer.async_wait(wrap([*this](error_code ec) mutable {
                 auto check = check_not_concurrent();
-                if (continue_handler(ec, check)) {
-                    close(asio::error::operation_aborted);
+                if (continue_handler(ec, check)) { // if any, the completion error of async_wait is passed to close()
+                    close(asio::error::operation_aborted); // otherwise we pass 'operation_aborted'
                 }
             }));
             // Start reading and the periodic write back
