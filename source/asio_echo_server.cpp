@@ -1,4 +1,5 @@
 //#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
+//#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
 #include "bind_allocator.hpp"
 #include "on_scope_exit.hpp"
@@ -22,6 +23,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -29,8 +31,14 @@
 namespace asio = boost::asio;
 using error_code = boost::system::error_code;
 
+namespace async_utils {
+
 // Helper base class to add a 'continue_handler' method in derived classes.
-template <class Derived> struct add_continue_handler {
+// It expects:
+//      - bool Derived::is_open()
+//      - Derived::close()
+//      - Derived::try_invoke()
+template <class Derived> struct enable_continue_handler {
 
     // Tests if am intermediary completion handler should continue its execution.
     // It shouldn't if the intermediary operation has failed or if the composed operation has been closed.
@@ -49,6 +57,78 @@ template <class Derived> struct add_continue_handler {
     }
 };
 
+// Helper base class to add a 'continue_handler' method in derived classes and support for verifying that there are no
+// concurrent completion handlers.
+// It expects:
+//      - bool Derived::is_open()
+//      - Derived::close()
+//      - Derived::try_invoke()
+//      - std::atomic_bool &Derived::executing()
+template <class Derived> struct enable_continue_handler_not_concurrent {
+  private:
+    template <typename F> struct [[nodiscard]] check_scope_exit {
+        explicit check_scope_exit(F && f) : m_f(std::move(f)) {}
+        check_scope_exit(check_scope_exit const &) = delete;
+        check_scope_exit(check_scope_exit &&) = delete;
+        check_scope_exit &operator=(check_scope_exit const &) = delete;
+        check_scope_exit &operator=(check_scope_exit &&other) = delete;
+        ~check_scope_exit() { reset(); }
+        void reset() noexcept {
+            if (m_f) {
+                (*m_f)();
+                m_f.reset();
+            }
+        }
+
+      private:
+        std::optional<F> m_f;
+    };
+
+    template <typename F> decltype(auto) make_check_scope_exit(F &&f) {
+        return check_scope_exit<F>(std::forward<F>(f));
+    }
+
+  public:
+    // Returns a check scope guard object that ensures there are no concurrent accesses until its destruction.
+    decltype(auto) check_not_concurrent() {
+        auto *pthis = static_cast<Derived *>(this);
+        std::atomic_bool &executing = pthis->executing();
+        BOOST_ASSERT(!executing);
+        executing = true;
+        return make_check_scope_exit([&executing] {
+            BOOST_ASSERT(executing);
+            executing = false;
+        });
+    }
+
+    // Same as enable_continue_handler::continue_handler() but it disables a check scope guard before invoking the
+    // final handler.
+    template <typename CheckScopeExit = std::optional<unsigned>>
+    bool continue_handler(error_code ec, CheckScopeExit *check_scope_exit = nullptr) {
+        auto *pthis = static_cast<Derived *>(this);
+        if (pthis->is_open() && !ec) {
+            return true;
+        }
+
+        if (pthis->is_open()) {
+            pthis->close(ec);
+        }
+
+        if (check_scope_exit != nullptr) {
+            check_scope_exit->reset();
+        }
+
+        pthis->try_invoke();
+        return false;
+    }
+
+    template <typename CheckScopeExit> bool continue_handler(error_code ec, CheckScopeExit &check_scope_exit) {
+        return continue_handler(ec, &check_scope_exit);
+    }
+};
+
+} // namespace async_utils
+
 // Continuously write on a socket what was read last, until async_wait() on the close timer returns.
 // The completion handler will receive the error that led to the connection being closed and
 // the total number of bytes that were written on the socket.
@@ -64,7 +144,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
         state_data(StreamSocket &socket, asio::steady_timer &close_timer, buffer_allocator const &allocator)
             : socket{socket}, close_timer{close_timer}, reading_buffer{max_size, allocator},
               read_buffer{max_size, allocator}, writing_buffer{max_size, allocator},
-              write_timer{close_timer.get_executor().context()}, is_open{}, total_write_size{} {}
+              write_timer{close_timer.get_executor().context()}, executing{}, is_open{}, total_write_size{} {}
 
         StreamSocket &socket;
         asio::steady_timer &close_timer;
@@ -73,6 +153,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
         buffer_t read_buffer;
         buffer_t writing_buffer;
         asio::steady_timer write_timer;
+        std::atomic_bool executing;
         bool is_open;
         error_code user_completion_error;
         std::size_t total_write_size;
@@ -80,9 +161,10 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
 
     using base_type =
         async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
-    struct internal_op : base_type, add_continue_handler<internal_op> {
+    struct internal_op : base_type, async_utils::enable_continue_handler_not_concurrent<internal_op> {
         using base_type::wrap; // MSVC workaround ('this->` fails to compile in lambdas that copy 'this')
-        using add_continue_handler<internal_op>::continue_handler;
+        using async_utils::enable_continue_handler_not_concurrent<internal_op>::check_not_concurrent;
+        using async_utils::enable_continue_handler_not_concurrent<internal_op>::continue_handler;
         state_data &data;
 
         internal_op(StreamSocket &socket, asio::steady_timer &close_timer, buffer_allocator const &allocator,
@@ -92,7 +174,8 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
 
             // Waiting for the signal to close this (with either the async_wait error or operation_aborted)
             data.close_timer.async_wait(wrap([*this](error_code ec) mutable {
-                if (continue_handler(ec)) {
+                auto check = check_not_concurrent();
+                if (continue_handler(ec, check)) {
                     close(asio::error::operation_aborted);
                 }
             }));
@@ -105,7 +188,8 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
         void start_read() {
             data.socket.async_read_some(asio::buffer(data.reading_buffer),
                                         wrap([*this](error_code ec, std::size_t bytes) mutable {
-                                            if (continue_handler(ec)) {
+                                            auto check = check_not_concurrent();
+                                            if (continue_handler(ec, check)) {
                                                 data.reading_buffer.resize(bytes);
                                                 std::swap(data.reading_buffer, data.read_buffer);
                                                 data.reading_buffer.resize(data.max_size);
@@ -117,7 +201,8 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
         void start_wait_write() {
             data.write_timer.expires_after(std::chrono::seconds(1));
             data.write_timer.async_wait(wrap([*this](error_code ec) mutable {
-                if (continue_handler(ec)) {
+                auto check = check_not_concurrent();
+                if (continue_handler(ec, check)) {
                     if (!data.read_buffer.empty()) {
                         std::swap(data.read_buffer, data.writing_buffer);
                         data.read_buffer.resize(0);
@@ -125,7 +210,8 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
                     if (!data.writing_buffer.empty()) {
                         asio::async_write(data.socket, asio::buffer(data.writing_buffer),
                                           wrap([*this](error_code ec, std::size_t bytes) mutable {
-                                              if (continue_handler(ec)) {
+                                              auto check = check_not_concurrent();
+                                              if (continue_handler(ec, check)) {
                                                   data.total_write_size += bytes;
                                                   start_wait_write();
                                               }
@@ -137,6 +223,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
             }));
         }
 
+        std::atomic_bool &executing() { return data.executing; }
         bool is_open() const { return data.is_open; }
         void close(error_code ec) {
             data.user_completion_error = ec;
@@ -147,7 +234,10 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
             data.close_timer.cancel();
             data.write_timer.cancel();
         }
-        void try_invoke() { this->try_invoke_move_args(data.user_completion_error, data.total_write_size); }
+        void try_invoke() {
+            assert(!executing()); // This ensures there is no outstanding `check_not_concurrent` scope guard.
+            this->try_invoke_move_args(data.user_completion_error, data.total_write_size);
+        }
     };
 
     typename internal_op::completion_type completion(token);
@@ -181,9 +271,9 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
 
     using base_type =
         async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
-    struct internal_op : base_type, add_continue_handler<internal_op> {
+    struct internal_op : base_type, async_utils::enable_continue_handler<internal_op> {
         using base_type::wrap;
-        using add_continue_handler<internal_op>::continue_handler;
+        using async_utils::enable_continue_handler<internal_op>::continue_handler;
         state_data &data;
 
         internal_op(Acceptor &acceptor, asio::steady_timer &close_timer,
@@ -275,9 +365,9 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
 
     using base_type =
         async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
-    struct internal_op : base_type, add_continue_handler<internal_op> {
+    struct internal_op : base_type, async_utils::enable_continue_handler<internal_op> {
         using base_type::wrap;
-        using add_continue_handler<internal_op>::continue_handler;
+        using async_utils::enable_continue_handler<internal_op>::continue_handler;
         state_data &data;
 
         internal_op(Acceptor &acceptor, typename base_type::completion_handler_type &&completion_handler)
@@ -348,7 +438,7 @@ int main(int argc, char **argv) {
         // We run the server in a thread-pool and we wait for completion with a future.
         auto threads_io_work = asio::make_work_guard(io_context.get_executor());
         std::vector<std::thread> threads;
-        unsigned thread_count = 1; // TODO(sorf): server is not safe to run in multiple threads
+        unsigned thread_count = 25;
         threads.reserve(thread_count);
         for (unsigned i = 0; i < thread_count; ++i) {
             threads.emplace_back([&io_context] { io_context.run(); });
