@@ -24,6 +24,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <tuple>
@@ -387,47 +388,59 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
     struct state_data {
         explicit state_data(Acceptor &acceptor)
             : signals{acceptor.get_executor().context(), SIGINT},
-              close_timer{acceptor.get_executor().context()}, is_open{}, total_client_count{} {}
+              close_timer{acceptor.get_executor().context()}, executing{}, is_open{}, total_client_count{} {}
 
         asio::signal_set signals;
         asio::steady_timer close_timer;
+        std::atomic_bool executing;
         bool is_open;
         error_code user_completion_error;
         std::size_t total_client_count;
+        // Note: Here we don't use a strand as we don't want the whole underlying async_echo_server() to run in it.
+        // Instead we synchronize the completion handlers with a mutex.
+        std::mutex mutex;
     };
-
+    using unique_lock = std::unique_lock<std::mutex>;
     using base_type =
         async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
-    struct internal_op : base_type, async_utils::enable_continue_handler<internal_op> {
+    struct internal_op : base_type, async_utils::enable_continue_handler_not_concurrent<internal_op> {
         using base_type::wrap;
-        using async_utils::enable_continue_handler<internal_op>::continue_handler;
+        using async_utils::enable_continue_handler_not_concurrent<internal_op>::check_not_concurrent;
+        using async_utils::enable_continue_handler_not_concurrent<internal_op>::continue_handler;
         state_data &data;
 
         internal_op(Acceptor &acceptor, typename base_type::completion_handler_type &&completion_handler)
             : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor}, data{base_type::get_data()} {
 
+            unique_lock lock(data.mutex);
+            [[maybe_unused]] auto check = check_not_concurrent();
             data.close_timer.expires_at(asio::steady_timer::time_point::max());
             data.signals.async_wait(wrap([*this](error_code ec, int /*unused*/) mutable {
+                unique_lock lock(data.mutex);
+                auto check = check_not_concurrent();
                 if (ec) {
                     std::cout << boost::format("Error waiting for signal: %1%:%2%") % ec % ec.message() << std::endl;
                 } else {
                     std::cout << "\nCTRL-C detected" << std::endl;
                 }
-                if (continue_handler(ec)) {
+                if (continue_handler(ec, check)) { // TODO: The mutex must be unlocked before invoking the handler
                     close(asio::error::operation_aborted);
                 }
             }));
-
             async_echo_server(acceptor, data.close_timer,
                               wrap([*this](error_code ec, std::size_t client_count) mutable {
+                                  unique_lock lock(data.mutex);
+                                  auto check = check_not_concurrent();
                                   data.user_completion_error = ec;
                                   data.total_client_count = client_count;
-                                  try_invoke();
+                                  check.reset();
+                                  try_invoke(); // TODO: The mutex must be unlocked before invoking the handler
                               }));
 
             data.is_open = true;
         }
 
+        std::atomic_bool &executing() { return data.executing; }
         bool is_open() const { return data.is_open; }
         void close(error_code ec) {
             data.user_completion_error = ec;
@@ -437,6 +450,7 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
             data.signals.cancel(ignored);
         }
         void try_invoke() {
+            assert(!executing());
             this->try_invoke_move_args(std::make_pair(data.user_completion_error, data.total_client_count));
         }
     };
@@ -462,6 +476,7 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
                     typename base_type::completion_handler_type &&completion_handler)
             : base_type{acceptor.get_executor(), std::move(completion_handler)} {
 
+            // No need for any synchronization here as we start a single asynchronous operation.
             async_echo_server_until_ctrl_c(
                 acceptor, async_utils::bind_allocator(
                               allocator, this->wrap([*this](server_close_status status) mutable { invoke(status); })));

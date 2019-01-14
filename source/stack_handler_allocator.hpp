@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <new>
+#include <thread>
 
 #if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
 #include <boost/format.hpp>
