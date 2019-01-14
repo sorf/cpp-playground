@@ -47,6 +47,15 @@ decltype(auto) get_handler_allocator(CompletionHandler const &handler) {
     return allocator;
 }
 
+// The executor associated associated with a completion handler.
+template <typename CompletionHandler, typename Executor>
+using completion_handler_executor = typename asio::associated_executor<CompletionHandler, Executor>::type;
+
+// The executor associated associated with a completion handler.
+template <typename CompletionHandlerSignature, typename CompletionToken, typename Executor>
+using completion_handler_executor_token = completion_handler_executor<
+    typename asio::async_completion<CompletionToken, CompletionHandlerSignature>::completion_handler_type, Executor>;
+
 // Container of the state associated with multiple asychronous operations.
 // It holds the final operation completion handler, an executor to be used as a default if the final completion handler
 // doesn't have any associated with it and any other state data used by the implementation of the asychronous operation.
@@ -63,6 +72,10 @@ class shared_async_state {
     template <typename T>
     using define_handler_allocator =
         ::async_utils::define_handler_allocator_token<T, CompletionHandlerSignature, CompletionToken>;
+
+    // The executor associated with the completion handler
+    using completion_handler_executor_type =
+        completion_handler_executor_token<CompletionHandlerSignature, CompletionToken, Executor>;
 
   private:
     struct state_holder;
@@ -130,7 +143,7 @@ class shared_async_state {
     }
 
     // Returns the executor associated with the handler.
-    decltype(auto) get_executor() const noexcept {
+    completion_handler_executor_type get_executor() const noexcept {
         return asio::get_associated_executor(m_state->completion_handler, m_state->executor);
     }
 
@@ -139,8 +152,11 @@ class shared_async_state {
         BOOST_ASSERT(m_state);
         BOOST_ASSERT(m_state->io_work.owns_work());
         auto allocator = this->get_allocator<void>();
-        auto executor = asio::get_associated_executor(m_state->completion_handler, m_state->executor);
-        return asio::bind_executor(std::move(executor), bind_allocator(std::move(allocator), std::forward<F>(f)));
+        auto executor = this->get_executor();
+        // Note: bind_executor() followed by bind_allocator() fails to compile if the result of this wrap() function
+        // is bound to a strand, e.g. if calling:
+        //      asio::bind_executor(strand, wrap(...))
+        return bind_allocator(std::move(allocator), asio::bind_executor(std::move(executor), std::forward<F>(f)));
     }
 
     // Tests that this is the only instance sharing the state data.

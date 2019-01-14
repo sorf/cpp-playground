@@ -258,20 +258,24 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
     using socket_type = typename Acceptor::protocol_type::socket;
     using endpoint_type = typename Acceptor::endpoint_type;
 
+    using executor_type = typename Acceptor::executor_type;
+    using completion_handler_executor_type =
+        async_utils::completion_handler_executor_token<signature, CompletionToken, executor_type>;
+    using strand_type = asio::strand<completion_handler_executor_type>;
+
     struct state_data {
         state_data(Acceptor &acceptor, asio::steady_timer &close_timer)
             : acceptor{acceptor}, close_timer{close_timer}, is_open{}, total_client_count{} {}
 
         Acceptor &acceptor;
         asio::steady_timer &close_timer;
-        std::map<endpoint_type, std::tuple<socket_type, asio::steady_timer>> clients;
+        std::map<endpoint_type, std::tuple<socket_type, asio::steady_timer, strand_type>> clients;
         bool is_open;
         error_code user_completion_error;
         std::size_t total_client_count;
     };
 
-    using base_type =
-        async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
+    using base_type = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
     struct internal_op : base_type, async_utils::enable_continue_handler<internal_op> {
         using base_type::wrap;
         using async_utils::enable_continue_handler<internal_op>::continue_handler;
@@ -303,26 +307,34 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
         }
 
         void start_client(socket_type &&socket) {
-            asio::steady_timer close_timer{data.close_timer.get_executor().context()};
-            close_timer.expires_at(asio::steady_timer::time_point::max());
             error_code ec;
-            auto endpoint = socket.remote_endpoint(ec);
+            auto ep = socket.remote_endpoint(ec);
             if (ec) {
                 return; // The connection is gone already.
             }
-
+            auto &io_context = data.acceptor.get_executor().context();
+            asio::steady_timer close_timer{io_context};
+            close_timer.expires_at(asio::steady_timer::time_point::max());
+            auto i =
+                data.clients.try_emplace(std::move(ep), std::move(socket), std::move(close_timer), this->get_executor())
+                    .first;
             ++data.total_client_count;
-            auto i = data.clients.try_emplace(std::move(endpoint), std::move(socket), std::move(close_timer)).first;
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
-            async_repeat_echo(
-                std::get<0>(i->second), std::get<1>(i->second),
-                wrap([*this, i](error_code ec, std::size_t bytes) mutable {
-                    std::cout << boost::format("client[%1%]: Disconnected: transferred: %2% (closing error: %3%:%4%)") %
-                                     i->first % bytes % ec % ec.message()
-                              << std::endl;
-                    data.clients.erase(i);
-                    try_invoke();
-                }));
+            // Run the client operation through its own strand (including the initiation of the async operation)
+            strand_type &strand = std::get<2>(i->second);
+            io_context.post(asio::bind_executor(
+                strand, wrap([*this, i, &strand]() mutable {
+                    async_repeat_echo(std::get<0>(i->second), std::get<1>(i->second),
+                                      asio::bind_executor(
+                                          strand, wrap([*this, i](error_code ec, std::size_t bytes) mutable {
+                                              std::cout << boost::format("client[%1%]: Disconnected: transferred: %2% "
+                                                                         "(closing error: %3%:%4%)") %
+                                                               i->first % bytes % ec % ec.message()
+                                                        << std::endl;
+                                              data.clients.erase(i);
+                                              try_invoke();
+                                          })));
+                })));
         }
 
         bool is_open() const { return data.is_open; }
@@ -462,10 +474,10 @@ int main(int argc, char **argv) {
 
         asio::io_context io_context;
         asio::ip::tcp::acceptor acceptor{io_context};
-        asio::ip::tcp::endpoint endpoint{address, port};
-        acceptor.open(endpoint.protocol());
+        asio::ip::tcp::endpoint ep{address, port};
+        acceptor.open(ep.protocol());
         acceptor.set_option(asio::socket_base::reuse_address(true));
-        acceptor.bind(endpoint);
+        acceptor.bind(ep);
         acceptor.listen();
 
         // We run the server in a thread-pool and we wait for completion with a future.
@@ -477,13 +489,13 @@ int main(int argc, char **argv) {
             threads.emplace_back([&io_context] { io_context.run(); });
         }
 
-        std::cout << boost::format("Server: Starting on: %1%") % endpoint << std::endl;
+        std::cout << boost::format("Server: Starting on: %1%") % ep << std::endl;
         std::future<server_close_status> f =
             async_echo_server_until_ctrl_c_allocator(acceptor, handler_allocator, asio::use_future);
         try {
             auto status = f.get();
-            std::cout << boost::format("Server: Stopped: clients: %2% (closing error: %3%:%4%)") % endpoint %
-                             status.second % status.first % status.first.message()
+            std::cout << boost::format("Server: Stopped: clients: %1% (closing error: %2%:%3%)") % status.second %
+                             status.first % status.first.message()
                       << std::endl;
         } catch (std::exception const &e) {
             std::cout << "Server: Run error: " << e.what() << std::endl;
