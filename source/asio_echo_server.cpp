@@ -9,6 +9,7 @@
 #include <atomic>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/bind_executor.hpp>
+#include <boost/asio/dispatch.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read.hpp>
@@ -312,17 +313,17 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
             if (ec) {
                 return; // The connection is gone already.
             }
-            auto &io_context = data.acceptor.get_executor().context();
-            asio::steady_timer close_timer{io_context};
+            asio::steady_timer close_timer{data.acceptor.get_executor().context()};
             close_timer.expires_at(asio::steady_timer::time_point::max());
             auto i =
                 data.clients.try_emplace(std::move(ep), std::move(socket), std::move(close_timer), this->get_executor())
                     .first;
             ++data.total_client_count;
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
-            // Run the client operation through its own strand (including the initiation of the async operation)
+            // Run the client operation through its own strand
+            // Note: The initiation of the async operation has to run in the same strand, hence the dispatch() call
             strand_type &strand = std::get<2>(i->second);
-            io_context.post(asio::bind_executor(
+            asio::dispatch(asio::bind_executor(
                 strand, wrap([*this, i, &strand]() mutable {
                     async_repeat_echo(std::get<0>(i->second), std::get<1>(i->second),
                                       asio::bind_executor(
