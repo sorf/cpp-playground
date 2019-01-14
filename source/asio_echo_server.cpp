@@ -315,7 +315,8 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
             auto i = data.clients.try_emplace(std::move(endpoint), std::move(socket), std::move(close_timer)).first;
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
             async_repeat_echo(
-                std::get<0>(i->second), std::get<1>(i->second), wrap([*this, i](error_code ec, std::size_t bytes) mutable {
+                std::get<0>(i->second), std::get<1>(i->second),
+                wrap([*this, i](error_code ec, std::size_t bytes) mutable {
                     std::cout << boost::format("client[%1%]: Disconnected: transferred: %2% (closing error: %3%:%4%)") %
                                      i->first % bytes % ec % ec.message()
                               << std::endl;
