@@ -173,6 +173,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
                     typename base_type::completion_handler_type &&completion_handler)
             : base_type{socket.get_executor(), std::move(completion_handler), socket, close_timer, allocator},
               data{base_type::get_data()} {
+            [[maybe_unused]] auto check = check_not_concurrent();
 
             // Waiting for the signal to close this
             data.close_timer.async_wait(wrap([*this](error_code ec) mutable {
@@ -201,7 +202,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
         }
 
         void start_wait_write() {
-            data.write_timer.expires_after(std::chrono::seconds(1));
+            data.write_timer.expires_after(std::chrono::seconds{1});
             data.write_timer.async_wait(wrap([*this](error_code ec) mutable {
                 auto check = check_not_concurrent();
                 if (continue_handler(ec, check)) {
@@ -266,45 +267,57 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
 
     struct state_data {
         state_data(Acceptor &acceptor, asio::steady_timer &close_timer)
-            : acceptor{acceptor}, close_timer{close_timer}, is_open{}, total_client_count{} {}
+            : acceptor{acceptor}, close_timer{close_timer}, executing{}, is_open{}, total_client_count{} {}
 
         Acceptor &acceptor;
         asio::steady_timer &close_timer;
         std::map<endpoint_type, std::tuple<socket_type, asio::steady_timer, strand_type>> clients;
+        std::atomic_bool executing;
         bool is_open;
         error_code user_completion_error;
         std::size_t total_client_count;
     };
 
     using base_type = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
-    struct internal_op : base_type, async_utils::enable_continue_handler<internal_op> {
+    struct internal_op : base_type, async_utils::enable_continue_handler_not_concurrent<internal_op> {
         using base_type::wrap;
-        using async_utils::enable_continue_handler<internal_op>::continue_handler;
+        using async_utils::enable_continue_handler_not_concurrent<internal_op>::check_not_concurrent;
+        using async_utils::enable_continue_handler_not_concurrent<internal_op>::continue_handler;
         state_data &data;
+        strand_type server_strand;
 
         internal_op(Acceptor &acceptor, asio::steady_timer &close_timer,
                     typename base_type::completion_handler_type &&completion_handler)
             : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor, close_timer},
-              data{base_type::get_data()} {
+              data{base_type::get_data()}, server_strand{base_type::get_executor()} {
 
-            // Waiting for the signal to close this (with either the async_wait error or operation_aborted)
-            data.close_timer.async_wait(wrap([*this](error_code ec) mutable {
-                if (continue_handler(ec)) {
-                    close(asio::error::operation_aborted);
-                }
-            }));
-            // Start accepting
-            start_accept();
-            data.is_open = true;
+            // Initiate the operations to run in the server strand
+            asio::dispatch(asio::bind_executor(server_strand, wrap([*this]() mutable {
+                                                   [[maybe_unused]] auto check = check_not_concurrent();
+                                                   // Waiting for the signal to close this (with either the async_wait
+                                                   // error or operation_aborted)
+                                                   data.close_timer.async_wait(asio::bind_executor(
+                                                       server_strand, wrap([*this](error_code ec) mutable {
+                                                           auto check = check_not_concurrent();
+                                                           if (continue_handler(ec, check)) {
+                                                               close(asio::error::operation_aborted);
+                                                           }
+                                                       })));
+                                                   // Start accepting
+                                                   start_accept();
+                                                   data.is_open = true;
+                                               })));
         }
 
         void start_accept() {
-            data.acceptor.async_accept(wrap([*this](error_code ec, socket_type socket) mutable {
-                if (continue_handler(ec)) {
-                    start_accept();
-                    start_client(std::move(socket));
-                }
-            }));
+            data.acceptor.async_accept(
+                asio::bind_executor(server_strand, wrap([*this](error_code ec, socket_type socket) mutable {
+                                        auto check = check_not_concurrent();
+                                        if (continue_handler(ec, check)) {
+                                            start_accept();
+                                            start_client(std::move(socket));
+                                        }
+                                    })));
         }
 
         void start_client(socket_type &&socket) {
@@ -322,12 +335,12 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
             // Run the client operation through its own strand
             // Note: The initiation of the async operation has to run in the same strand, hence the dispatch() call
-            strand_type &strand = std::get<2>(i->second);
+            strand_type &client_strand = std::get<2>(i->second);
             asio::dispatch(asio::bind_executor(
-                strand, wrap([*this, i, &strand]() mutable {
+                client_strand, wrap([*this, i, &client_strand]() mutable {
                     async_repeat_echo(std::get<0>(i->second), std::get<1>(i->second),
                                       asio::bind_executor(
-                                          strand, wrap([*this, i](error_code ec, std::size_t bytes) mutable {
+                                          client_strand, wrap([*this, i](error_code ec, std::size_t bytes) mutable {
                                               std::cout << boost::format("client[%1%]: Disconnected: transferred: %2% "
                                                                          "(closing error: %3%:%4%)") %
                                                                i->first % bytes % ec % ec.message()
@@ -338,6 +351,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
                 })));
         }
 
+        std::atomic_bool &executing() { return data.executing; }
         bool is_open() const { return data.is_open; }
         void close(error_code ec) {
             data.user_completion_error = ec;
@@ -348,7 +362,10 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
                 std::get<1>(v).cancel();
             }
         }
-        void try_invoke() { this->try_invoke_move_args(data.user_completion_error, data.total_client_count); }
+        void try_invoke() {
+            assert(!executing()); // This ensures there is no outstanding `check_not_concurrent` scope guard.
+            this->try_invoke_move_args(data.user_completion_error, data.total_client_count);
+        }
     };
 
     typename internal_op::completion_type completion(token);
