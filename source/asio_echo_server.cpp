@@ -1,4 +1,4 @@
-//#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
+#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
 #include "bind_allocator.hpp"
@@ -42,7 +42,7 @@ template <class Derived> struct enable_continue_handler {
 
     // Tests if am intermediary completion handler should continue its execution.
     // It shouldn't if the intermediary operation has failed or if the composed operation has been closed.
-    // In these cases, the final completion handler is attempted to be called - will be called only when
+    // In these cases, the final completion handler is attempted to be called, it will be called only when
     // this is the last instance sharing the ownership of the composed operation state.
     bool continue_handler(error_code ec) {
         auto *pthis = static_cast<Derived *>(this);
@@ -110,15 +110,12 @@ template <class Derived> struct enable_continue_handler_not_concurrent {
         if (pthis->is_open() && !ec) {
             return true;
         }
-
         if (pthis->is_open()) {
             pthis->close(ec);
         }
-
         if (check_scope_exit != nullptr) {
             check_scope_exit->reset();
         }
-
         pthis->try_invoke();
         return false;
     }
@@ -133,6 +130,9 @@ template <class Derived> struct enable_continue_handler_not_concurrent {
 // Continuously write on a socket what was read last, until async_wait() on the close timer returns.
 // The completion handler will receive the error that led to the connection being closed and
 // the total number of bytes that were written on the socket.
+//
+// The caller is responsible for ensuring that the this call and all the internal operations are running from the same
+// implicit or explicit strand.
 template <typename StreamSocket, typename CompletionToken>
 auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -176,7 +176,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
             // Waiting for the signal to close this
             data.close_timer.async_wait(wrap([*this](error_code ec) mutable {
                 auto check = check_not_concurrent();
-                if (continue_handler(ec, check)) { // if any, the completion error of async_wait is passed to close()
+                if (continue_handler(ec, check)) { // the completion error of async_wait(), if any, is passed to close()
                     close(asio::error::operation_aborted); // otherwise we pass 'operation_aborted'
                 }
             }));
@@ -315,13 +315,13 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
             auto i = data.clients.try_emplace(std::move(endpoint), std::move(socket), std::move(close_timer)).first;
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
             async_repeat_echo(
-                std::get<0>(i->second), std::get<1>(i->second), [*this, i](error_code ec, std::size_t bytes) mutable {
+                std::get<0>(i->second), std::get<1>(i->second), wrap([*this, i](error_code ec, std::size_t bytes) mutable {
                     std::cout << boost::format("client[%1%]: Disconnected: transferred: %2% (closing error: %3%:%4%)") %
                                      i->first % bytes % ec % ec.message()
                               << std::endl;
                     data.clients.erase(i);
                     try_invoke();
-                });
+                }));
         }
 
         bool is_open() const { return data.is_open; }
@@ -342,6 +342,8 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
     return completion.result.get();
 }
 
+// The server close status:
+// the error that closed the server (usually 'operation_aborted') and the number of clients it had.
 using server_close_status = std::pair<error_code, std::size_t>;
 
 // Runs the echo server until CTRL-C.
@@ -353,10 +355,9 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
     using signature = void(server_close_status);
     struct state_data {
         explicit state_data(Acceptor &acceptor)
-            : acceptor{acceptor}, signals{acceptor.get_executor().context(), SIGINT},
+            : signals{acceptor.get_executor().context(), SIGINT},
               close_timer{acceptor.get_executor().context()}, is_open{}, total_client_count{} {}
 
-        Acceptor &acceptor;
         asio::signal_set signals;
         asio::steady_timer close_timer;
         bool is_open;
@@ -386,7 +387,7 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
                 }
             }));
 
-            async_echo_server(data.acceptor, data.close_timer,
+            async_echo_server(acceptor, data.close_timer,
                               wrap([*this](error_code ec, std::size_t client_count) mutable {
                                   data.user_completion_error = ec;
                                   data.total_client_count = client_count;
@@ -414,12 +415,39 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
     return completion.result.get();
 }
 
+// Runs the echo server until CTRL-C with an allocator.
+template <typename Acceptor, typename Allocator, typename CompletionToken>
+auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator const &allocator, CompletionToken &&token)
+    -> typename asio::async_result<std::decay_t<CompletionToken>, void(server_close_status)>::return_type {
+
+    using signature = void(server_close_status);
+    struct state_data {};
+
+    using base_type =
+        async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
+    struct internal_op : base_type {
+        using base_type::invoke; // MSVC workaround ('this->invoke()` fails to compile in the lambda)
+        internal_op(Acceptor &acceptor, Allocator const &allocator,
+                    typename base_type::completion_handler_type &&completion_handler)
+            : base_type{acceptor.get_executor(), std::move(completion_handler)} {
+
+            async_echo_server_until_ctrl_c(
+                acceptor, async_utils::bind_allocator(
+                              allocator, this->wrap([*this](server_close_status status) mutable { invoke(status); })));
+        }
+    };
+
+    typename internal_op::completion_type completion(token);
+    internal_op op{acceptor, allocator, std::move(completion.completion_handler)};
+    return completion.result.get();
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         std::cerr << "Usage: echo-op <address> <port>\n"
                   << "Example:\n"
                   << "    echo-op 0.0.0.0 8080\n";
-        return EXIT_FAILURE;
+        return 1;
     }
     char const *arg_program = argv[0]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     char const *arg_address = argv[1]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
@@ -427,6 +455,9 @@ int main(int argc, char **argv) {
     try {
         auto const address{asio::ip::make_address(arg_address)};
         auto const port{static_cast<std::uint16_t>(std::strtol(arg_port, nullptr, 0))};
+
+        async_utils::stack_handler_memory<64> handler_memory;
+        async_utils::stack_handler_allocator<void> handler_allocator(handler_memory);
 
         asio::io_context io_context;
         asio::ip::tcp::acceptor acceptor{io_context};
@@ -446,7 +477,8 @@ int main(int argc, char **argv) {
         }
 
         std::cout << boost::format("Server: Starting on: %1%") % endpoint << std::endl;
-        std::future<server_close_status> f = async_echo_server_until_ctrl_c(acceptor, asio::use_future);
+        std::future<server_close_status> f =
+            async_echo_server_until_ctrl_c_allocator(acceptor, handler_allocator, asio::use_future);
         try {
             auto status = f.get();
             std::cout << boost::format("Server: Stopped: clients: %2% (closing error: %3%:%4%)") % endpoint %

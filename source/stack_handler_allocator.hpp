@@ -97,10 +97,10 @@ template <typename T> struct stack_handler_allocator {
     stack_handler_allocator(stack_handler_allocator<U> const &other) noexcept : m_storage{other.m_storage} {}
 
     template <typename U> bool operator==(stack_handler_allocator<U> const &other) const noexcept {
-        return &m_storage == other.m_storage;
+        return &m_storage == &other.m_storage;
     }
     template <typename U> bool operator!=(stack_handler_allocator<U> const &other) const noexcept {
-        return &m_storage != other.m_storage;
+        return &m_storage != &other.m_storage;
     }
 
     T *allocate(std::size_t count) const { return static_cast<T *>(m_storage.allocate(count * sizeof(T))); }
