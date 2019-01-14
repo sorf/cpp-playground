@@ -40,7 +40,9 @@ class stack_handler_memory : public stack_handler_memory_base {
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
                 if (!m_in_use[i]) {
 #if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
-                    std::cout << boost::format("handler: allocated[%d]: size: %d") % i % size << std::endl;
+                    std::cout << boost::format("[tid: %d] handler: allocated[%d]: size: %d") %
+                                     std::this_thread::get_id() % i % size
+                              << std::endl;
 #endif
                     m_in_use[i] = true;  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
                     ptr = &m_storage[i]; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
@@ -51,7 +53,8 @@ class stack_handler_memory : public stack_handler_memory_base {
 
         if (ptr == nullptr) {
 #if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
-            std::cout << boost::format("handler: global new: size: %d") % size << std::endl;
+            std::cout << boost::format("[tid: %d] handler: global new: size: %d") % std::this_thread::get_id() % size
+                      << std::endl;
 #endif
             ptr = ::operator new(size);
         }
@@ -66,7 +69,8 @@ class stack_handler_memory : public stack_handler_memory_base {
             if (ptr == &m_storage[i]) {
 #if defined(ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG)
                 try {
-                    std::cout << boost::format("handler: deallocated[%d]") % i << std::endl;
+                    std::cout << boost::format("[tid: %d] handler: deallocated[%d]") % std::this_thread::get_id() % i
+                              << std::endl;
                 } catch (...) {
                 }
 #endif
