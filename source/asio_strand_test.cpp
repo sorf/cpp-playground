@@ -187,7 +187,6 @@ int main() {
         });
 
         runt_test("2-strands-dispatch-done-in-3rd", [](asio::io_context &io_context) {
-            //auto print_strand = std::make_shared<strand_type>(io_context.get_executor());
             strand_type print_strand(io_context.get_executor());
             {
                 strand_type strand{io_context.get_executor()};
