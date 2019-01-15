@@ -479,7 +479,8 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
             async_echo_server_until_ctrl_c(
                 acceptor, async_utils::bind_allocator(
                               allocator, this->wrap([*this](error_code ec, std::size_t client_count) mutable {
-                                  invoke(ec, client_count); })));
+                                  invoke(ec, client_count);
+                              })));
         }
     };
 
