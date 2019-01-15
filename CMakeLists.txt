@@ -29,6 +29,7 @@ endfunction(define_test_executable)
 
 
 set(TESTS
+    asio_strand_test;
     asio_echo; asio_echo_v2; asio_echo_v3; asio_echo_v4;
     asio_composed_one_flow; asio_composed_one_flow_async_op; asio_composed_one_flow_compose;
     asio_composed;
