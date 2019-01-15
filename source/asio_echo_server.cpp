@@ -175,7 +175,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
             // Waiting for the signal to close this
             data.close_timer.async_wait(wrap([*this](error_code ec) mutable {
                 auto check = check_not_concurrent();
-                close(ec, check);
+                close(ec == asio::error::operation_aborted ? error_code() : ec, check);
             }));
             // Start reading and the periodic write back
             start_read();
@@ -263,7 +263,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
 
     struct state_data {
         state_data(Acceptor &acceptor, asio::steady_timer &close_timer)
-            : acceptor{acceptor}, close_timer{close_timer}, executing{}, is_open{}, total_client_count{} {}
+            : acceptor{acceptor}, close_timer{close_timer}, executing{}, is_open{}, client_count{} {}
 
         Acceptor &acceptor;
         asio::steady_timer &close_timer;
@@ -271,7 +271,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
         std::atomic_bool executing;
         bool is_open;
         error_code user_completion_error;
-        std::size_t total_client_count;
+        std::size_t client_count;
     };
 
     using base_type = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
@@ -289,18 +289,19 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
               data{base_type::get_data()}, server_strand{base_type::get_executor()} {
 
             // Initiate the operations to run in the server strand
-            asio::dispatch(asio::bind_executor(server_strand, wrap([*this]() mutable {
-                                                   [[maybe_unused]] auto check = check_not_concurrent();
-                                                   // Waiting for the signal to close this
-                                                   data.close_timer.async_wait(asio::bind_executor(
-                                                       server_strand, wrap([*this](error_code ec) mutable {
-                                                           auto check = check_not_concurrent();
-                                                           close(ec, check);
-                                                       })));
-                                                   // Start accepting
-                                                   start_accept();
-                                                   data.is_open = true;
-                                               })));
+            asio::dispatch(
+                asio::bind_executor(server_strand, wrap([*this]() mutable {
+                                        [[maybe_unused]] auto check = check_not_concurrent();
+                                        // Waiting for the signal to close this
+                                        data.close_timer.async_wait(asio::bind_executor(
+                                            server_strand, wrap([*this](error_code ec) mutable {
+                                                auto check = check_not_concurrent();
+                                                close(ec == asio::error::operation_aborted ? error_code() : ec, check);
+                                            })));
+                                        // Start accepting
+                                        start_accept();
+                                        data.is_open = true;
+                                    })));
         }
 
         void start_accept() {
@@ -325,7 +326,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
             auto i =
                 data.clients.try_emplace(std::move(ep), std::move(socket), std::move(close_timer), this->get_executor())
                     .first;
-            ++data.total_client_count;
+            ++data.client_count;
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
             // Run the client operation through its own strand
             // Note (GOTCHA): The initiation of the async operation has to run in the same strand, hence the
@@ -360,7 +361,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
         }
         void try_invoke() {
             assert(!data.executing); // This ensures there is no outstanding `check_not_concurrent` scope guard.
-            this->try_invoke_move_args(data.user_completion_error, data.total_client_count);
+            this->try_invoke_move_args(data.user_completion_error, data.client_count);
         }
     };
 
@@ -369,18 +370,15 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
     return completion.result.get();
 }
 
-// The server close status:
-// the error that closed the server (if any) and the number of clients it had.
-using server_close_status = std::pair<error_code, std::size_t>;
-
 // Runs the echo server until CTRL-C.
-// The completing handler will receive a `server_close_status`.
+// The completion handler will receive the error that closed the server and the total number of clients that
+// connected to it.
 // The operation uses strands internally.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token) ->
-    typename asio::async_result<std::decay_t<CompletionToken>, void(server_close_status)>::return_type {
+    typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
-    using signature = void(server_close_status);
+    using signature = void(error_code, std::size_t);
     using executor_type = typename Acceptor::executor_type;
     using completion_handler_executor_type =
         async_utils::completion_handler_executor_token<signature, CompletionToken, executor_type>;
@@ -389,14 +387,14 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
     struct state_data {
         explicit state_data(Acceptor &acceptor)
             : signals{acceptor.get_executor().context(), SIGINT},
-              close_timer{acceptor.get_executor().context()}, executing{}, is_open{}, total_client_count{} {}
+              close_timer{acceptor.get_executor().context()}, executing{}, is_open{}, client_count{} {}
 
         asio::signal_set signals;
         asio::steady_timer close_timer;
         std::atomic_bool executing;
         bool is_open;
         error_code user_completion_error;
-        std::size_t total_client_count;
+        std::size_t client_count;
     };
     using base_type =
         async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
@@ -433,10 +431,10 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
             async_echo_server(acceptor, data.close_timer,
                               wrap([*this](error_code ec, std::size_t client_count) mutable {
                                   asio::post(asio::bind_executor(strand, wrap([*this, ec, client_count]() mutable {
-                                                                         auto check = check_not_concurrent();
-                                                                         data.total_client_count = client_count;
-                                                                         close(ec, check);
-                                                                     })));
+                                                                     auto check = check_not_concurrent();
+                                                                     data.client_count = client_count;
+                                                                     close(ec, check);
+                                                                 })));
                               }));
             data.is_open = true;
         }
@@ -452,7 +450,7 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         }
         void try_invoke() {
             assert(!data.executing);
-            this->try_invoke_move_args(std::make_pair(data.user_completion_error, data.total_client_count));
+            this->try_invoke_move_args(data.user_completion_error, data.client_count);
         }
     };
 
@@ -464,9 +462,9 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
 // Runs the echo server until CTRL-C with an allocator.
 template <typename Acceptor, typename Allocator, typename CompletionToken>
 auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator const &allocator, CompletionToken &&token)
-    -> typename asio::async_result<std::decay_t<CompletionToken>, void(server_close_status)>::return_type {
+    -> typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
-    using signature = void(server_close_status);
+    using signature = void(error_code, std::size_t);
     struct state_data {};
 
     using base_type =
@@ -480,7 +478,8 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
             // We shouldn`t need any synchronization here as we start a single asynchronous operation.
             async_echo_server_until_ctrl_c(
                 acceptor, async_utils::bind_allocator(
-                              allocator, this->wrap([*this](server_close_status status) mutable { invoke(status); })));
+                              allocator, this->wrap([*this](error_code ec, std::size_t client_count) mutable {
+                                  invoke(ec, client_count); })));
         }
     };
 
@@ -524,13 +523,11 @@ int main(int argc, char **argv) {
         }
 
         std::cout << boost::format("Server: Starting on: %1%") % ep << std::endl;
-        std::future<server_close_status> f =
+        std::future<std::size_t> f =
             async_echo_server_until_ctrl_c_allocator(acceptor, handler_allocator, asio::use_future);
         try {
-            auto status = f.get();
-            std::cout << boost::format("Server: Stopped: clients: %1% (closing error: %2%:%3%)") % status.second %
-                             status.first % status.first.message()
-                      << std::endl;
+            auto client_count = f.get();
+            std::cout << boost::format("Server: Stopped: client-count: %1%") % client_count << std::endl;
         } catch (std::exception const &e) {
             std::cout << "Server: Run error: " << e.what() << std::endl;
         }
