@@ -65,13 +65,13 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 decltype(auto) operation(std::string_view classname, std::string_view method, std::size_t id) {
     std::string pre_marker(id % 10, ' ');
     std::string post_marker(10 - id % 10, ' ');
-    print(boost::format("[%s] %s\\%s [%d]%s::%s") % thread_names::this_thread() % pre_marker % post_marker % id %
+    print(boost::format("[%s] %s\\%s enter [%d]%s::%s") % thread_names::this_thread() % pre_marker % post_marker % id %
           classname % method);
     std::this_thread::sleep_for(std::chrono::milliseconds{id});
     return on_scope_exit([=] {
         std::this_thread::sleep_for(std::chrono::milliseconds{id});
-        print(boost::format("[%s] %s/%s [%d]%s::%s") % thread_names::this_thread() % pre_marker % post_marker % id %
-              classname % method);
+        print(boost::format("[%s] %s/%s  exit [%d]%s::%s") % thread_names::this_thread() % pre_marker % post_marker %
+              id % classname % method);
     });
 }
 
@@ -132,93 +132,116 @@ int main() {
     using strand_type = asio::strand<asio::io_context::executor_type>;
     try {
 
-        runt_test("no-strand", [](asio::io_context &io_context) {
-            composed_one_flow<100>::start(io_context,
-                                          [] { [[maybe_unused]] auto o = operation("run_test", "done", 1105); });
-            composed_one_flow<200>::start(io_context,
-                                          [] { [[maybe_unused]] auto o = operation("run_test", "done", 1205); });
-        });
+        runt_test("no-strand\n\t"
+                  "operation 100, done-handler 1105\n\t"
+                  "operations 200, done-handler 1205",
+                  [](asio::io_context &io_context) {
+                      composed_one_flow<100>::start(
+                          io_context, [] { [[maybe_unused]] auto o = operation("run_test", "done", 1105); });
+                      composed_one_flow<200>::start(
+                          io_context, [] { [[maybe_unused]] auto o = operation("run_test", "done", 1205); });
+                  });
 
-        runt_test("initiation-not-in-strand", [](asio::io_context &io_context) {
-            strand_type strand{io_context.get_executor()};
-            composed_one_flow<100>::start(io_context, asio::bind_executor(strand, [strand] {
-                                              [[maybe_unused]] auto o = operation("run_test", "done", 1105);
-                                          }));
-            composed_one_flow<200>::start(io_context, asio::bind_executor(strand, [strand] {
-                                              [[maybe_unused]] auto o = operation("run_test", "done", 1205);
-                                          }));
-        });
+        runt_test("all-in-one-strand except initiation (likely a bug)\n\t"
+                  "operation 100, done-handler 1105\n\t"
+                  "operations 200, done-handler 1205",
+                  [](asio::io_context &io_context) {
+                      strand_type strand{io_context.get_executor()};
+                      composed_one_flow<100>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                        [[maybe_unused]] auto o = operation("run_test", "done", 1105);
+                                                    }));
+                      composed_one_flow<200>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                        [[maybe_unused]] auto o = operation("run_test", "done", 1205);
+                                                    }));
+                  });
 
-        runt_test("all-in-strand", [](asio::io_context &io_context) {
-            strand_type strand{io_context.get_executor()};
-            asio::dispatch(asio::bind_executor(strand, [&, strand] {
-                composed_one_flow<100>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                  [[maybe_unused]] auto o = operation("run_test", "done", 1105);
-                                              }));
-                composed_one_flow<200>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                  [[maybe_unused]] auto o = operation("run_test", "done", 1205);
-                                              }));
-            }));
-        });
+        runt_test("all-in-one-strand\n\t"
+                  "operation 100, done-handler 1105\n\t"
+                  "operations 200, done-handler 1205",
+                  [](asio::io_context &io_context) {
+                      strand_type strand{io_context.get_executor()};
+                      asio::dispatch(asio::bind_executor(strand, [&, strand] {
+                          composed_one_flow<100>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                            [[maybe_unused]] auto o =
+                                                                operation("run_test", "done", 1105);
+                                                        }));
+                          composed_one_flow<200>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                            [[maybe_unused]] auto o =
+                                                                operation("run_test", "done", 1205);
+                                                        }));
+                      }));
+                  });
 
-        runt_test("2-strands", [](asio::io_context &io_context) {
-            {
-                strand_type strand{io_context.get_executor()};
-                asio::dispatch(asio::bind_executor(strand, [&, strand] {
-                    composed_one_flow<100>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                      [[maybe_unused]] auto o = operation("run_test", "done", 1105);
-                                                  }));
-                    composed_one_flow<200>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                      [[maybe_unused]] auto o = operation("run_test", "done", 1205);
-                                                  }));
-                }));
-            }
-            {
-                strand_type strand{io_context.get_executor()};
-                asio::dispatch(asio::bind_executor(strand, [&, strand] {
-                    composed_one_flow<109>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                      [[maybe_unused]] auto o = operation("run_test", "done", 1106);
-                                                  }));
-                    composed_one_flow<209>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                      [[maybe_unused]] auto o = operation("run_test", "done", 1206);
-                                                  }));
-                }));
-            }
-        });
-
-        runt_test("2-strands-dispatch-done-in-3rd", [](asio::io_context &io_context) {
-            strand_type print_strand(io_context.get_executor());
-            {
-                strand_type strand{io_context.get_executor()};
-                asio::dispatch(asio::bind_executor(strand, [&, strand, print_strand] {
-                    composed_one_flow<100>::start(io_context, asio::bind_executor(strand, [strand, print_strand] {
-                                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+        runt_test(
+            "2-strands\n\t"
+            "strand1: operations *00, done-handler 1*05\n\t"
+            "strand2: operations *09, done-handler 1*06",
+            [](asio::io_context &io_context) {
+                {
+                    strand_type strand{io_context.get_executor()};
+                    asio::dispatch(asio::bind_executor(strand, [&, strand] {
+                        composed_one_flow<100>::start(io_context, asio::bind_executor(strand, [strand] {
                                                           [[maybe_unused]] auto o = operation("run_test", "done", 1105);
                                                       }));
-                                                  }));
-                    composed_one_flow<200>::start(io_context, asio::bind_executor(strand, [strand, print_strand] {
-                                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+                        composed_one_flow<200>::start(io_context, asio::bind_executor(strand, [strand] {
                                                           [[maybe_unused]] auto o = operation("run_test", "done", 1205);
                                                       }));
-                                                  }));
-                }));
-            }
-            {
-                strand_type strand{io_context.get_executor()};
-                asio::dispatch(asio::bind_executor(strand, [&, strand, print_strand] {
-                    composed_one_flow<109>::start(io_context, asio::bind_executor(strand, [strand, print_strand] {
-                                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+                    }));
+                }
+                {
+                    strand_type strand{io_context.get_executor()};
+                    asio::dispatch(asio::bind_executor(strand, [&, strand] {
+                        composed_one_flow<109>::start(io_context, asio::bind_executor(strand, [strand] {
                                                           [[maybe_unused]] auto o = operation("run_test", "done", 1106);
                                                       }));
-                                                  }));
-                    composed_one_flow<209>::start(io_context, asio::bind_executor(strand, [strand, print_strand] {
-                                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+                        composed_one_flow<209>::start(io_context, asio::bind_executor(strand, [strand] {
                                                           [[maybe_unused]] auto o = operation("run_test", "done", 1206);
                                                       }));
-                                                  }));
-                }));
-            }
-        });
+                    }));
+                }
+            });
+
+        runt_test("2-strands and dispatch in a 3rd\n\t"
+                  "strand1: operations *00, done-handler 1*05\n\t"
+                  "strand2: operations *09, done-handler 1*06\n\t"
+                  "print_strand: executes the done_handlers",
+                  [](asio::io_context &io_context) {
+                      strand_type print_strand(io_context.get_executor());
+                      {
+                          strand_type strand{io_context.get_executor()};
+                          asio::dispatch(asio::bind_executor(strand, [&, strand, print_strand] {
+                              composed_one_flow<100>::start(
+                                  io_context, asio::bind_executor(strand, [strand, print_strand] {
+                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+                                          [[maybe_unused]] auto o = operation("run_test", "done", 1105);
+                                      }));
+                                  }));
+                              composed_one_flow<200>::start(
+                                  io_context, asio::bind_executor(strand, [strand, print_strand] {
+                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+                                          [[maybe_unused]] auto o = operation("run_test", "done", 1205);
+                                      }));
+                                  }));
+                          }));
+                      }
+                      {
+                          strand_type strand{io_context.get_executor()};
+                          asio::dispatch(asio::bind_executor(strand, [&, strand, print_strand] {
+                              composed_one_flow<109>::start(
+                                  io_context, asio::bind_executor(strand, [strand, print_strand] {
+                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+                                          [[maybe_unused]] auto o = operation("run_test", "done", 1106);
+                                      }));
+                                  }));
+                              composed_one_flow<209>::start(
+                                  io_context, asio::bind_executor(strand, [strand, print_strand] {
+                                      asio::dispatch(asio::bind_executor(print_strand, [print_strand] {
+                                          [[maybe_unused]] auto o = operation("run_test", "done", 1206);
+                                      }));
+                                  }));
+                          }));
+                      }
+                  });
 
     } catch (std::exception const &e) {
         std::cout << "Error: " << e.what() << "\n";
