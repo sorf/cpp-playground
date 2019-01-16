@@ -12,15 +12,15 @@
 // The way successive '\' and '/' are printed (their position in the message is operation-id % 10)
 // should make more easy to visualize operations that
 // - executed concurrently:
-//      \      or    \         or      \
-//      \                \                   \
-//      /            /                       /
-//      /                /             /
+//      \      or    \         or      \           .
+//      \                \                   \     .
+//      /            /                       /     .
+//      /                /             /           .
 // - executed serially:
-//      \         or   \
-//      /              /
-//      \                  \
-//      /                  /
+//      \         or   \                           .
+//      /              /                           .
+//      \                  \                       .
+//      /                  /                       .
 //
 // The operation-ids used below are chosen based on the duration of the sleep they will generate
 // and the position of the '\', '/' markers that will be printed for them.
