@@ -1,12 +1,12 @@
 // Composing asynchronous operations up to an echo server that gracefully shuts down on CTRL-C.
 //
 // The example shows writing and composing these operations:
-// - read data from a socket and write it back periodically until an error occurs or the operation is closed
+// - read data from a socket and write it back periodically until an error occurs or the operation is cancelled
 //      via a timer object passsed by the caller (see: `async_repeat_echo`)
 // - run a server that accepts clients and runs `async_repeat_echo()` for each of them, until the the operation
-//      is closed via a timer object passsed by the caller (see: `async_echo_server`)
+//      is cancelled via a timer object passsed by the caller (see: `async_echo_server`)
 // - runs a server until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
-// - runs a server until closed using the given allocator (see: `async_echo_server_until_ctrl_c_allocator')
+// - runs a server until cancelled using the given allocator (see: `async_echo_server_until_ctrl_c_allocator')
 //
 // This top level operation is then run in a thread pool and called with the `use_future` completion token
 // (see: 'main').
@@ -18,12 +18,12 @@
 //      similarly to `shared_handler_storage`
 //      https://gist.github.com/djarek/7994948863f5c5cec4054976b68ba847#file-with_timeout-cpp-L30
 //      and a way of creating completion handlers from lambda functions.
-// - a `async_composed_helpers` base class that implements common logic related to the closing sequence,
+// - a `async_composed_helpers` base class that implements common logic related to the cancelling sequence,
 //      invoking the final completion handler and detecting concurrent execution of completion handlers where this is
 //      not supported.
 // - some of them use a `steady_timer` as a way to signal when they should stop.
 //      The caller sets up a timer object to never expire for each such operation and then cancels it when the operation
-//      should close.
+//      should cancel.
 //
 #define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
@@ -65,12 +65,12 @@ namespace async_utils {
 // Temporary (in this form) helper base class.
 // It adds support for:
 // - verifying that there are no concurrent completion handlers
-// - the logic around triggerring and detecting the closing of asynchronous operations.
+// - the logic around triggerring and detecting the cancelling of asynchronous operations.
 //
 // It expects:
 //      - std::atomic_bool *Derived::executing() // optional (if it returns nullptr)
 //      - bool Derived::is_open()
-//      - Derived::close_impl(error_code)
+//      - Derived::cancel_impl(error_code)
 //      - Derived::try_invoke()
 template <class Derived> struct async_composed_helpers {
   private:
@@ -114,7 +114,7 @@ template <class Derived> struct async_composed_helpers {
     }
 
     // Tests if an intermediary completion handler should continue its execution.
-    // It shouldn't if the intermediary operation has failed or if the composed operation has been closed.
+    // It shouldn't if the intermediary operation has failed or if the composed operation has been cancelled.
     // In these cases, the final completion handler is attempted to be called; it will be called only when
     // this is the last instance sharing the ownership of the composed operation state.
     template <typename CheckScopeExit = std::optional<unsigned>>
@@ -123,7 +123,7 @@ template <class Derived> struct async_composed_helpers {
         if (pthis->is_open() && !ec) {
             return true;
         }
-        close(ec, check_scope_exit);
+        cancel(ec, check_scope_exit);
         return false;
     }
 
@@ -131,12 +131,12 @@ template <class Derived> struct async_composed_helpers {
         return continue_handler(ec, &check_scope_exit);
     }
 
-    // Initiates the closing of the operation and attempts to call the final completion handler.
+    // Initiates the cancelling of the operation and attempts to call the final completion handler.
     template <typename CheckScopeExit = std::optional<unsigned>>
-    void close(error_code ec, CheckScopeExit *check_scope_exit = nullptr) {
+    void cancel(error_code ec, CheckScopeExit *check_scope_exit = nullptr) {
         auto *pthis = static_cast<Derived *>(this);
         if (pthis->is_open()) {
-            pthis->close_impl(ec);
+            pthis->cancel_impl(ec);
         }
         if (check_scope_exit != nullptr) {
             check_scope_exit->reset();
@@ -144,16 +144,18 @@ template <class Derived> struct async_composed_helpers {
         pthis->try_invoke();
     }
 
-    template <typename CheckScopeExit> void close(error_code ec, CheckScopeExit &check_scope_exit) {
-        return close(ec, &check_scope_exit);
+    template <typename CheckScopeExit> void cancel(error_code ec, CheckScopeExit &check_scope_exit) {
+        return cancel(ec, &check_scope_exit);
     }
 };
 
 } // namespace async_utils
 
-// Continuously write on a socket what was read last, until `async_wait()` on `close_timer` returns.
-// The completion handler will receive the error that led to the connection being closed, if any, and
-// the total number of bytes that were written on the socket. The socket will closed, too.
+// Continuously write on a socket what was read last, until `async_wait()` on `cancel_timer` returns.
+// The completion handler will receive the error that led to the operation being cancelled, if any, and
+// the total number of bytes that were written on the socket.
+// Note: `cancel_timer.async_wait()` completing with `asio::error::operation_aborted` is not an error, it is considered
+// the normal way to cancel the execution of this operation.
 //
 // The caller is responsible for ensuring that this initiation call and all the internal operations are running
 // from the same implicit or explicit strand.
@@ -165,7 +167,7 @@ template <class Derived> struct async_composed_helpers {
 //      https://github.com/boostorg/beast/blob/develop/example/echo-op/echo_op.cpp#L72
 //
 template <typename StreamSocket, typename CompletionToken>
-auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, CompletionToken &&token) ->
+auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
     using signature = void(error_code, std::size_t);
@@ -173,20 +175,20 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
     using buffer_t = std::vector<char, buffer_allocator>;
 
     struct state_data {
-        state_data(StreamSocket &socket, asio::steady_timer &close_timer, buffer_allocator const &allocator)
-            : socket{socket}, close_timer{close_timer}, reading_buffer{max_size, allocator},
+        state_data(StreamSocket &socket, asio::steady_timer &cancel_timer, buffer_allocator const &allocator)
+            : socket{socket}, cancel_timer{cancel_timer}, reading_buffer{max_size, allocator},
               read_buffer{max_size, allocator}, writing_buffer{max_size, allocator},
-              write_timer{close_timer.get_executor().context()}, executing{}, is_open{}, total_write_size{} {}
+              write_timer{cancel_timer.get_executor().context()}, executing{}, is_open{}, total_write_size{} {}
 
         StreamSocket &socket;
-        asio::steady_timer &close_timer;
+        asio::steady_timer &cancel_timer;
         std::size_t const max_size = 128;
         buffer_t reading_buffer;        // buffer for reading in-progress
         buffer_t read_buffer;           // buffer for data that was last read and should be written next
         buffer_t writing_buffer;        // buffer for writing in-progress
         asio::steady_timer write_timer; // periodic write timer
         std::atomic_bool executing;     // flag for detecting concurrent execution of code that is not thread-safe
-        bool is_open;                   // not-closed flag
+        bool is_open;                   // opened (not cancelled) flag
         error_code user_completion_error;
         std::size_t total_write_size;
     };
@@ -197,19 +199,19 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
         using base_type::wrap; // MSVC workaround (`this->` fails to compile in lambdas that copy `this`)
         using async_utils::async_composed_helpers<internal_op>::check_not_concurrent;
         using async_utils::async_composed_helpers<internal_op>::continue_handler;
-        using async_utils::async_composed_helpers<internal_op>::close;
+        using async_utils::async_composed_helpers<internal_op>::cancel;
         state_data &data;
 
-        internal_op(StreamSocket &socket, asio::steady_timer &close_timer, buffer_allocator const &allocator,
+        internal_op(StreamSocket &socket, asio::steady_timer &cancel_timer, buffer_allocator const &allocator,
                     typename base_type::completion_handler_type &&completion_handler)
-            : base_type{socket.get_executor(), std::move(completion_handler), socket, close_timer, allocator},
+            : base_type{socket.get_executor(), std::move(completion_handler), socket, cancel_timer, allocator},
               data{base_type::get_data()} {
             [[maybe_unused]] auto check = check_not_concurrent();
 
-            // Waiting for the signal to close this
-            data.close_timer.async_wait(wrap([*this](error_code ec) mutable {
+            // Waiting for the signal to cancel this
+            data.cancel_timer.async_wait(wrap([*this](error_code ec) mutable {
                 auto check = check_not_concurrent();
-                close(ec == asio::error::operation_aborted ? error_code() : ec, check);
+                cancel(ec == asio::error::operation_aborted ? error_code() : ec, check);
             }));
             // Start reading and the periodic write back
             start_read();
@@ -257,13 +259,12 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
 
         std::atomic_bool *executing() { return &data.executing; }
         bool is_open() const { return data.is_open; }
-        void close_impl(error_code ec) {
+        void cancel_impl(error_code ec) {
             data.user_completion_error = ec;
             data.is_open = false;
             error_code ignored;
-            data.socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
-            data.socket.close(ignored);
-            data.close_timer.cancel();
+            data.socket.cancel(ignored);
+            data.cancel_timer.cancel();
             data.write_timer.cancel();
         }
         void try_invoke() {
@@ -274,16 +275,16 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
 
     typename internal_op::completion_type completion(token);
     auto allocator = async_utils::get_handler_allocator<typename buffer_t::value_type>(completion.completion_handler);
-    internal_op op{socket, close_timer, allocator, std::move(completion.completion_handler)};
+    internal_op op{socket, cancel_timer, allocator, std::move(completion.completion_handler)};
     return completion.result.get();
 }
 
 // Runs an echo server.
-// The completion handler will receive the error that closed the server and the total number of clients that
-// connected to it.
+// The completion handler will receive the error that led to the operation being cancelled, if any, and the total
+// number of clients that connected to it.
 // The operation uses strands internally, so there are no requirements on the way this operation is initiated.
 template <typename Acceptor, typename CompletionToken>
-auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, CompletionToken &&token) ->
+auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
     using signature = void(error_code, std::size_t);
@@ -296,11 +297,11 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
     using strand_type = asio::strand<completion_handler_executor_type>;
 
     struct state_data {
-        state_data(Acceptor &acceptor, asio::steady_timer &close_timer)
-            : acceptor{acceptor}, close_timer{close_timer}, executing{}, is_open{}, client_count{} {}
+        state_data(Acceptor &acceptor, asio::steady_timer &cancel_timer)
+            : acceptor{acceptor}, cancel_timer{cancel_timer}, executing{}, is_open{}, client_count{} {}
 
         Acceptor &acceptor;
-        asio::steady_timer &close_timer;
+        asio::steady_timer &cancel_timer;
         std::map<endpoint_type, std::tuple<socket_type, asio::steady_timer, strand_type>> clients;
         std::atomic_bool executing;
         bool is_open;
@@ -313,25 +314,25 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
         using base_type::wrap;
         using async_utils::async_composed_helpers<internal_op>::check_not_concurrent;
         using async_utils::async_composed_helpers<internal_op>::continue_handler;
-        using async_utils::async_composed_helpers<internal_op>::close;
+        using async_utils::async_composed_helpers<internal_op>::cancel;
         state_data &data;
         completion_handler_executor_type handler_executor;
         strand_type server_strand;
 
-        internal_op(Acceptor &acceptor, asio::steady_timer &close_timer,
+        internal_op(Acceptor &acceptor, asio::steady_timer &cancel_timer,
                     typename base_type::completion_handler_type &&completion_handler)
-            : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor, close_timer},
+            : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor, cancel_timer},
               data{base_type::get_data()}, handler_executor{base_type::get_executor()}, server_strand{
                                                                                             handler_executor} {
             // Initiate the operations to run in the server strand
             asio::dispatch(
                 asio::bind_executor(server_strand, wrap([*this]() mutable {
                                         [[maybe_unused]] auto check = check_not_concurrent();
-                                        // Waiting for the signal to close this
-                                        data.close_timer.async_wait(asio::bind_executor(
+                                        // Waiting for the signal to cancel this
+                                        data.cancel_timer.async_wait(asio::bind_executor(
                                             server_strand, wrap([*this](error_code ec) mutable {
                                                 auto check = check_not_concurrent();
-                                                close(ec == asio::error::operation_aborted ? error_code() : ec, check);
+                                                cancel(ec == asio::error::operation_aborted ? error_code() : ec, check);
                                             })));
                                         // Start accepting
                                         start_accept();
@@ -356,10 +357,10 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
             if (ec) {
                 return; // The connection is gone already.
             }
-            asio::steady_timer close_timer{data.acceptor.get_executor().context()};
-            close_timer.expires_at(asio::steady_timer::time_point::max());
+            asio::steady_timer cancel_timer{data.acceptor.get_executor().context()};
+            cancel_timer.expires_at(asio::steady_timer::time_point::max());
             auto i =
-                data.clients.try_emplace(std::move(ep), std::move(socket), std::move(close_timer), handler_executor)
+                data.clients.try_emplace(std::move(ep), std::move(socket), std::move(cancel_timer), handler_executor)
                     .first;
             ++data.client_count;
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
@@ -370,6 +371,12 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
                     async_repeat_echo(std::get<0>(i->second), std::get<1>(i->second),
                                       asio::bind_executor(
                                           client_strand, wrap([*this, i](error_code ec, std::size_t bytes) mutable {
+                                              // Closing the client socket and saving any first error to log it
+                                              auto &client_socket = std::get<0>(i->second);
+                                              error_code ignored;
+                                              client_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both,
+                                                                     !ec ? ec : ignored);
+                                              client_socket.close(!ec ? ec : ignored);
                                               std::cout << boost::format("client[%1%]: Disconnected: transferred: %2% "
                                                                          "(closing error: %3%:%4%)") %
                                                                i->first % bytes % ec % ec.message()
@@ -383,11 +390,11 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
 
         std::atomic_bool *executing() { return &data.executing; }
         bool is_open() const { return data.is_open; }
-        void close_impl(error_code ec) {
+        void cancel_impl(error_code ec) {
             data.user_completion_error = ec;
             data.is_open = false;
             error_code ignored;
-            data.acceptor.close(ignored);
+            data.acceptor.cancel(ignored);
             for (auto &&[k, v] : data.clients) {
                 std::get<1>(v).cancel();
             }
@@ -399,12 +406,12 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
     };
 
     typename internal_op::completion_type completion(token);
-    internal_op op{acceptor, close_timer, std::move(completion.completion_handler)};
+    internal_op op{acceptor, cancel_timer, std::move(completion.completion_handler)};
     return completion.result.get();
 }
 
 // Runs the echo server until CTRL-C.
-// The completion handler will receive the error that closed the server and the total number of clients that
+// The completion handler will receive the error that cancelled the server, if any, and the total number of clients that
 // connected to it.
 // The operation uses strands internally, so there are no requirements on the way this operation is initiated.
 template <typename Acceptor, typename CompletionToken>
@@ -420,10 +427,10 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
     struct state_data {
         explicit state_data(Acceptor &acceptor)
             : signals{acceptor.get_executor().context(), SIGINT},
-              close_timer{acceptor.get_executor().context()}, executing{}, is_open{}, client_count{} {}
+              cancel_timer{acceptor.get_executor().context()}, executing{}, is_open{}, client_count{} {}
 
         asio::signal_set signals;
-        asio::steady_timer close_timer;
+        asio::steady_timer cancel_timer;
         std::atomic_bool executing;
         bool is_open;
         error_code user_completion_error;
@@ -435,7 +442,7 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         using base_type::wrap;
         using async_utils::async_composed_helpers<internal_op>::check_not_concurrent;
         using async_utils::async_composed_helpers<internal_op>::continue_handler;
-        using async_utils::async_composed_helpers<internal_op>::close;
+        using async_utils::async_composed_helpers<internal_op>::cancel;
         state_data &data;
         strand_type strand;
 
@@ -446,25 +453,25 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
             // We initiate and run the waiting for CTRL-C in the strand of `this`.
             asio::dispatch(asio::bind_executor(strand, wrap([*this]() mutable {
                                                    [[maybe_unused]] auto check = check_not_concurrent();
-                                                   data.close_timer.expires_at(asio::steady_timer::time_point::max());
+                                                   data.cancel_timer.expires_at(asio::steady_timer::time_point::max());
                                                    data.signals.async_wait(asio::bind_executor(
                                                        strand, wrap([*this](error_code ec, int /*unused*/) mutable {
                                                            auto check = check_not_concurrent();
                                                            if (!ec) {
                                                                std::cout << "\nCTRL-C detected" << std::endl;
                                                            }
-                                                           close(ec, check);
+                                                           cancel(ec, check);
                                                        })));
                                                })));
 
             // We don't need to initiate the run-server operation in the strand of `this` as it uses strands internally.
             // But the completion handler will have to run in the strand of this.
             async_echo_server(
-                acceptor, data.close_timer,
+                acceptor, data.cancel_timer,
                 asio::bind_executor(strand, wrap([*this](error_code ec, std::size_t client_count) mutable {
                                         auto check = check_not_concurrent();
                                         data.client_count = client_count;
-                                        close(ec, check);
+                                        cancel(ec, check);
                                     })));
 
             data.is_open = true;
@@ -472,10 +479,10 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
 
         std::atomic_bool *executing() { return &data.executing; }
         bool is_open() const { return data.is_open; }
-        void close_impl(error_code ec) {
+        void cancel_impl(error_code ec) {
             data.user_completion_error = ec;
             data.is_open = false;
-            data.close_timer.cancel();
+            data.cancel_timer.cancel();
             error_code ignored;
             data.signals.cancel(ignored);
         }
