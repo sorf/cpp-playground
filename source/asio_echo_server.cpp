@@ -171,7 +171,9 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
     using signature = void(error_code, std::size_t);
-    using buffer_allocator = async_utils::define_handler_allocator_token<char, signature, CompletionToken>;
+    using executor_type = typename StreamSocket::executor_type;
+    using handler_traits = async_utils::completion_handler_traits<signature, CompletionToken, executor_type>;
+    using buffer_allocator = typename handler_traits::template rebound_allocator_type<char>;
     using buffer_t = std::vector<char, buffer_allocator>;
 
     struct state_data {
@@ -193,8 +195,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
         std::size_t total_write_size;
     };
 
-    using base_type =
-        async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
+    using base_type = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
     struct internal_op : base_type, async_utils::async_composed_helpers<internal_op> {
         using base_type::wrap; // MSVC workaround (`this->` fails to compile in lambdas that copy `this`)
         using async_utils::async_composed_helpers<internal_op>::check_not_concurrent;
@@ -274,7 +275,8 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
     };
 
     typename internal_op::completion_type completion(token);
-    auto allocator = async_utils::get_handler_allocator<typename buffer_t::value_type>(completion.completion_handler);
+    auto allocator =
+        handler_traits::template get_handler_allocator<typename buffer_t::value_type>(completion.completion_handler);
     internal_op op{socket, cancel_timer, allocator, std::move(completion.completion_handler)};
     return completion.result.get();
 }
@@ -290,10 +292,9 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
     using signature = void(error_code, std::size_t);
     using socket_type = typename Acceptor::protocol_type::socket;
     using endpoint_type = typename Acceptor::endpoint_type;
-
     using executor_type = typename Acceptor::executor_type;
-    using completion_handler_executor_type =
-        async_utils::completion_handler_executor_token<signature, CompletionToken, executor_type>;
+    using handler_traits = async_utils::completion_handler_traits<signature, CompletionToken, executor_type>;
+    using completion_handler_executor_type = typename handler_traits::completion_handler_executor_type;
     using strand_type = asio::strand<completion_handler_executor_type>;
 
     struct state_data {
@@ -322,7 +323,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
         internal_op(Acceptor &acceptor, asio::steady_timer &cancel_timer,
                     typename base_type::completion_handler_type &&completion_handler)
             : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor, cancel_timer},
-              data{base_type::get_data()}, handler_executor{base_type::get_executor()}, server_strand{
+              data{base_type::get_data()}, handler_executor{base_type::get_handler_executor()}, server_strand{
                                                                                             handler_executor} {
             // Initiate the operations to run in the server strand
             asio::dispatch(
@@ -420,8 +421,8 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
 
     using signature = void(error_code, std::size_t);
     using executor_type = typename Acceptor::executor_type;
-    using completion_handler_executor_type =
-        async_utils::completion_handler_executor_token<signature, CompletionToken, executor_type>;
+    using handler_traits = async_utils::completion_handler_traits<signature, CompletionToken, executor_type>;
+    using completion_handler_executor_type = typename handler_traits::completion_handler_executor_type;
     using strand_type = asio::strand<completion_handler_executor_type>;
 
     struct state_data {
@@ -444,11 +445,12 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         using async_utils::async_composed_helpers<internal_op>::continue_handler;
         using async_utils::async_composed_helpers<internal_op>::cancel;
         state_data &data;
+        completion_handler_executor_type handler_executor;
         strand_type strand;
 
         internal_op(Acceptor &acceptor, typename base_type::completion_handler_type &&completion_handler)
             : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor}, data{base_type::get_data()},
-              strand{base_type::get_executor()} {
+              handler_executor{base_type::get_handler_executor()}, strand{base_type::get_handler_executor()} {
 
             // We initiate and run the waiting for CTRL-C in the strand of `this`.
             asio::dispatch(asio::bind_executor(strand, wrap([*this]() mutable {
