@@ -118,7 +118,7 @@ decltype(auto) operation(std::string_view classname, std::string_view method, st
 }
 
 // A very basic asynchronous composed operation implemented in terms of the operation() above.
-// The chain of asynchronous operations it executes: 
+// The chain of asynchronous operations it executes:
 // - start: asio::post(cont1)
 // - cont1: asio::post(cont2)
 // - cont2: asio::post(end)
@@ -155,7 +155,6 @@ template <std::size_t id> struct composed_operation {
     }
 };
 
-
 // Sets up an io_context to be run by a thread-pool and calls a test function with it.
 template <typename F> void runt_test(std::string_view test_name, F &&f) {
     thread_names::clear();
@@ -183,7 +182,7 @@ int main() {
     try {
         // Two composed operations without any strand.
         // Their internal completion handlers will run concurrently; even concurrently with the initiation function
-        // (e.g. start() running in parallel with cont1() for the same operation id) 
+        // (e.g. start() running in parallel with cont1() for the same operation id)
         runt_test("no strand\n\t"
                   "composed_operation 100 with final-handler 1105\n\t"
                   "composed_operation 200 with final-handler 1205",
@@ -202,11 +201,11 @@ int main() {
                   [](asio::io_context &io_context) {
                       strand_type strand{io_context.get_executor()};
                       composed_operation<100>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                        [[maybe_unused]] auto o = operation("", "final-handler", 1105);
-                                                    }));
+                                                         [[maybe_unused]] auto o = operation("", "final-handler", 1105);
+                                                     }));
                       composed_operation<200>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                        [[maybe_unused]] auto o = operation("", "final-handler", 1205);
-                                                    }));
+                                                         [[maybe_unused]] auto o = operation("", "final-handler", 1205);
+                                                     }));
                   });
 
         // No concurrent execution of initiation and completion handler functions.
@@ -217,49 +216,53 @@ int main() {
                       strand_type strand{io_context.get_executor()};
                       asio::dispatch(asio::bind_executor(strand, [&, strand] {
                           composed_operation<100>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                            [[maybe_unused]] auto o =
-                                                                operation("", "final-handler", 1105);
-                                                        }));
+                                                             [[maybe_unused]] auto o =
+                                                                 operation("", "final-handler", 1105);
+                                                         }));
                           composed_operation<200>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                            [[maybe_unused]] auto o =
-                                                                operation("", "final-handler", 1205);
-                                                        }));
+                                                             [[maybe_unused]] auto o =
+                                                                 operation("", "final-handler", 1205);
+                                                         }));
                       }));
                   });
 
         // Two pairs of composed operations running in their own strand, including their initiation functions.
         // The final completion handlers are called from these two strands
         // (so some execute in a strand, some in the other).
-        runt_test(
-            "2-strands\n\t"
-            "strand1: composed_operations *00 with final-handlers 1*05\n\t"
-            "strand2: composed_operations *09 with final-handlers 1*06",
-            [](asio::io_context &io_context) {
-                {
-                    strand_type strand{io_context.get_executor()};
-                    asio::dispatch(asio::bind_executor(strand, [&, strand] {
-                        composed_operation<100>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                          [[maybe_unused]] auto o = operation("", "final-handler", 1105);
-                                                      }));
-                        composed_operation<200>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                          [[maybe_unused]] auto o = operation("", "final-handler", 1205);
-                                                      }));
-                    }));
-                }
-                {
-                    strand_type strand{io_context.get_executor()};
-                    asio::dispatch(asio::bind_executor(strand, [&, strand] {
-                        composed_operation<109>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                          [[maybe_unused]] auto o = operation("", "final-handler", 1106);
-                                                      }));
-                        composed_operation<209>::start(io_context, asio::bind_executor(strand, [strand] {
-                                                          [[maybe_unused]] auto o = operation("", "final-handler", 1206);
-                                                      }));
-                    }));
-                }
-            });
+        runt_test("2-strands\n\t"
+                  "strand1: composed_operations *00 with final-handlers 1*05\n\t"
+                  "strand2: composed_operations *09 with final-handlers 1*06",
+                  [](asio::io_context &io_context) {
+                      {
+                          strand_type strand{io_context.get_executor()};
+                          asio::dispatch(asio::bind_executor(strand, [&, strand] {
+                              composed_operation<100>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                                 [[maybe_unused]] auto o =
+                                                                     operation("", "final-handler", 1105);
+                                                             }));
+                              composed_operation<200>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                                 [[maybe_unused]] auto o =
+                                                                     operation("", "final-handler", 1205);
+                                                             }));
+                          }));
+                      }
+                      {
+                          strand_type strand{io_context.get_executor()};
+                          asio::dispatch(asio::bind_executor(strand, [&, strand] {
+                              composed_operation<109>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                                 [[maybe_unused]] auto o =
+                                                                     operation("", "final-handler", 1106);
+                                                             }));
+                              composed_operation<209>::start(io_context, asio::bind_executor(strand, [strand] {
+                                                                 [[maybe_unused]] auto o =
+                                                                     operation("", "final-handler", 1206);
+                                                             }));
+                          }));
+                      }
+                  });
 
-        // Two pairs of composed operations running in their own strand, the final completion handlers are run in a 3rd strand.
+        // Two pairs of composed operations running in their own strand, the final completion handlers are run in a 3rd
+        // strand.
         runt_test("2-strands and dispatch in a 3rd\n\t"
                   "strand1: composed_operations *00 with final-handlers 1*05\n\t"
                   "strand2: composed_operations *09 with final-handlers 1*06\n\t"
