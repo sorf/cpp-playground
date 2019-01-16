@@ -1,3 +1,30 @@
+// Composing asynchronous operations up to an echo server that gracefully shuts down on CTRL-C.
+//
+// The example shows writing and composing these operations:
+// - read data from a socket and write it back periodically until an error occurs or the operation is closed
+//      via a timer object passsed by the caller (see: `async_repeat_echo`)
+// - run a server that accepts clients and runs `async_repeat_echo()` for each of them, until the the operation
+//      is closed via a timer object passsed by the caller (see: `async_echo_server`)
+// - runs a server until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
+// - runs a server until closed using the given allocator (see: `async_echo_server_until_ctrl_c_allocator')
+//
+// This top level operation is then run in a thread pool and called with the `use_future` completion token
+// (see: 'main').
+//
+// The implementation of the operations use these:
+// - a `shared_async_state` base class similar to `stable_async_op_base`
+//      https://github.com/boostorg/beast/blob/develop/include/boost/beast/core/async_op_base.hpp#L559
+//      but which offers shared ownership of the internal operation state data,
+//      similarly to `shared_handler_storage`
+//      https://gist.github.com/djarek/7994948863f5c5cec4054976b68ba847#file-with_timeout-cpp-L30
+//      and a way of creating completion handlers from lambda functions.
+// - a `async_composed_helpers` base class that implements common logic related to the closing sequence,
+//      invoking the final completion handler and detecting concurrent execution of completion handlers where this is
+//      not supported.
+// - some of them use a `steady_timer` as a way to signal when they should stop.
+//      The caller sets up a timer object to never expire for each such operation and then cancels it when the operation
+//      should close.
+//
 #define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
@@ -124,12 +151,19 @@ template <class Derived> struct async_composed_helpers {
 
 } // namespace async_utils
 
-// Continuously write on a socket what was read last, until async_wait() on the close timer returns.
-// The completion handler will receive the error that led to the connection being closed and
-// the total number of bytes that were written on the socket.
+// Continuously write on a socket what was read last, until `async_wait()` on `close_timer` returns.
+// The completion handler will receive the error that led to the connection being closed, if any, and
+// the total number of bytes that were written on the socket. The socket will closed, too.
 //
 // The caller is responsible for ensuring that this initiation call and all the internal operations are running
 // from the same implicit or explicit strand.
+//
+// This operation is based on these two examples:
+// - `async_write_messages()` from
+//      https://github.com/boostorg/asio/blob/develop/example/cpp11/operations/composed_5.cpp#L36
+// - `async_echo()` from
+//      https://github.com/boostorg/beast/blob/develop/example/echo-op/echo_op.cpp#L72
+//
 template <typename StreamSocket, typename CompletionToken>
 auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -147,12 +181,12 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
         StreamSocket &socket;
         asio::steady_timer &close_timer;
         std::size_t const max_size = 128;
-        buffer_t reading_buffer;
-        buffer_t read_buffer;
-        buffer_t writing_buffer;
-        asio::steady_timer write_timer;
-        std::atomic_bool executing;
-        bool is_open;
+        buffer_t reading_buffer;        // buffer for reading in-progress
+        buffer_t read_buffer;           // buffer for data that was last read and should be written next
+        buffer_t writing_buffer;        // buffer for writing in-progress
+        asio::steady_timer write_timer; // periodic write timer
+        std::atomic_bool executing;     // flag for detecting concurrent execution of code that is not thread-safe
+        bool is_open;                   // not-closed flag
         error_code user_completion_error;
         std::size_t total_write_size;
     };
@@ -247,7 +281,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &close_timer, Co
 // Runs an echo server.
 // The completion handler will receive the error that closed the server and the total number of clients that
 // connected to it.
-// The operation uses strands internally.
+// The operation uses strands internally, so there are no requirements on the way this operation is initiated.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -281,13 +315,14 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
         using async_utils::async_composed_helpers<internal_op>::continue_handler;
         using async_utils::async_composed_helpers<internal_op>::close;
         state_data &data;
+        completion_handler_executor_type handler_executor;
         strand_type server_strand;
 
         internal_op(Acceptor &acceptor, asio::steady_timer &close_timer,
                     typename base_type::completion_handler_type &&completion_handler)
             : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor, close_timer},
-              data{base_type::get_data()}, server_strand{base_type::get_executor()} {
-
+              data{base_type::get_data()}, handler_executor{base_type::get_executor()}, server_strand{
+                                                                                            handler_executor} {
             // Initiate the operations to run in the server strand
             asio::dispatch(
                 asio::bind_executor(server_strand, wrap([*this]() mutable {
@@ -324,13 +359,11 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
             asio::steady_timer close_timer{data.acceptor.get_executor().context()};
             close_timer.expires_at(asio::steady_timer::time_point::max());
             auto i =
-                data.clients.try_emplace(std::move(ep), std::move(socket), std::move(close_timer), this->get_executor())
+                data.clients.try_emplace(std::move(ep), std::move(socket), std::move(close_timer), handler_executor)
                     .first;
             ++data.client_count;
             std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
             // Run the client operation through its own strand
-            // Note (GOTCHA): The initiation of the async operation has to run in the same strand, hence the
-            // dispatch() call
             strand_type &client_strand = std::get<2>(i->second);
             asio::dispatch(asio::bind_executor(
                 client_strand, wrap([*this, i, &client_strand]() mutable {
@@ -373,7 +406,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &close_timer, Comp
 // Runs the echo server until CTRL-C.
 // The completion handler will receive the error that closed the server and the total number of clients that
 // connected to it.
-// The operation uses strands internally.
+// The operation uses strands internally, so there are no requirements on the way this operation is initiated.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -424,18 +457,16 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
                                                        })));
                                                })));
 
-            // We don't want to run the whole server in the strand of `this` as it already uses strands internally.
-            // Instead, in the completion handler, we *post* the handling of the result in the strand of `this`.
-            // Note (GOTCHA): `dispatch` is not correct here without modifying the two nested lambdas because
-            // it can lead to having two copies of `this` and thus `close` doesn't get to call the completion handler.
-            async_echo_server(acceptor, data.close_timer,
-                              wrap([*this](error_code ec, std::size_t client_count) mutable {
-                                  asio::post(asio::bind_executor(strand, wrap([*this, ec, client_count]() mutable {
-                                                                     auto check = check_not_concurrent();
-                                                                     data.client_count = client_count;
-                                                                     close(ec, check);
-                                                                 })));
-                              }));
+            // We don't need to initiate the run-server operation in the strand of `this` as it uses strands internally.
+            // But the completion handler will have to run in the strand of this.
+            async_echo_server(
+                acceptor, data.close_timer,
+                asio::bind_executor(strand, wrap([*this](error_code ec, std::size_t client_count) mutable {
+                                        auto check = check_not_concurrent();
+                                        data.client_count = client_count;
+                                        close(ec, check);
+                                    })));
+
             data.is_open = true;
         }
 
@@ -475,7 +506,7 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
                     typename base_type::completion_handler_type &&completion_handler)
             : base_type{acceptor.get_executor(), std::move(completion_handler)} {
 
-            // We shouldn`t need any synchronization here as we start a single asynchronous operation.
+            // We don't need any synchronization here as we start a single asynchronous operation.
             async_echo_server_until_ctrl_c(
                 acceptor, async_utils::bind_allocator(
                               allocator, this->wrap([*this](error_code ec, std::size_t client_count) mutable {
