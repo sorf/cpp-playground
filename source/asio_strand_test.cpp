@@ -49,6 +49,7 @@ std::mutex g_print_mutex;
 // Prints to std::cout under a mutex
 template <typename T> void print(T const &v) {
     std::lock_guard<std::mutex> lock{g_print_mutex};
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay, hicpp-no-array-decay)
     std::cout << v << std::endl;
 }
 

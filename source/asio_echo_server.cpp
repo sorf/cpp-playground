@@ -12,7 +12,7 @@
 // with the `use_future` completion token (see `run_server_and_join`).
 // One top level implementation runs a TCP server until the SIGINT signal (Ctrl-C) is received (see `run_tcp_server`).
 // The other runs a UNIX domain sockets server for a fixed duration of time while clients connect to it to
-// send and receive messages (see `run_posix_local_server_clients`).
+// send and receive messages (see `run_unix_local_server_clients`).
 //
 // The implementation of the composed asynchronous operations uses these:
 // - a `shared_async_state` (see shared_async_state.hpp) base class similar to `stable_async_op_base`
@@ -26,7 +26,7 @@
 //      not supported.
 // - some of them use a `steady_timer` as a way to signal when they should stop.
 //      The caller sets up a timer object to never expire for each such operation and then cancels it when the operation
-//      should cancel.
+//      should stop.
 //
 //#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
@@ -294,7 +294,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
 // Runs an echo server.
 // The completion handler will receive the error that led to the operation being cancelled, if any, and the total
 // number of clients that connected to it.
-// The operation uses strands internally, so there are no requirements on the way this operation is initiated.
+// The operation uses strands internally, so there are no requirements on the way it is initiated.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -368,9 +368,11 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
                 return; // The connection is gone already.
             }
             asio::steady_timer cancel_timer{data.acceptor.get_executor().context()};
+#ifndef __clang_analyzer__ // Silence: bugprone-use-after-move
             cancel_timer.expires_at(asio::steady_timer::time_point::max());
+#endif
             auto key = data.client_count++;
-            BOOST_ASSERT(data.clients.count(key) == 0);
+            BOOST_ASSERT(data.clients.count(key) == 0); // We must not invalidate iterators to existing clients.
             auto i = data.clients.try_emplace(key, std::move(socket), std::move(cancel_timer), handler_executor).first;
             std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % key % ep << std::endl;
             // Run the client operation through its own strand
@@ -423,7 +425,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
 // Runs the echo server until CTRL-C.
 // The completion handler will receive the error that cancelled the server, if any, and the total number of clients that
 // connected to it.
-// The operation uses strands internally, so there are no requirements on the way this operation is initiated.
+// The operation uses strands internally, so there are no requirements on the way it is initiated.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -473,7 +475,7 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
                                                })));
 
             // We don't need to initiate the run-server operation in the strand of `this` as it uses strands internally.
-            // But the completion handler will have to run in the strand of this.
+            // But the completion handler will have to run in the strand.
             async_echo_server(
                 acceptor, data.cancel_timer,
                 asio::bind_executor(strand, wrap([*this](error_code ec, std::size_t client_count) mutable {
@@ -520,7 +522,8 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
         internal_op(Acceptor &acceptor, Allocator const &allocator, typename shared_async_state::handler_type &&handler)
             : shared_async_state{acceptor.get_executor(), std::move(handler)} {
 
-            // We don't need any synchronization here as we start a single asynchronous operation.
+            // We don't need any synchronization here as we start a single asynchronous operation
+            // which doesn't have any requirements on the way it is initiated.
             async_echo_server_until_ctrl_c(
                 acceptor, async_utils::bind_allocator(
                               allocator, this->wrap([*this](error_code ec, std::size_t client_count) mutable {
@@ -534,7 +537,7 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
     return completion.result.get();
 }
 
-// Runs the server in a thread pool.
+// Runs the server in a thread pool using a `stack_handler_allocator`.
 // At the end it joins all the threads, even if an exception occurs.
 template <typename Acceptor>
 auto run_server_and_join(Acceptor &acceptor, std::size_t server_thread_count, std::vector<std::thread> &threads) {
@@ -601,7 +604,7 @@ int run_tcp_server(std::size_t server_thread_count, int argc, char **argv) {
 
 // Runs a UNIX domain sockets server and clients connecting to it.
 template <typename Duration>
-int run_posix_local_server_clients(std::size_t server_thread_count, std::size_t client_thread_count,
+int run_unix_local_server_clients(std::size_t server_thread_count, std::size_t client_thread_count,
                                    Duration run_duration) {
 #if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
     char const *test_file = "_TMP_local_server_test";
@@ -670,7 +673,7 @@ int run_posix_local_server_clients(std::size_t server_thread_count, std::size_t 
 int main(int argc, char **argv) {
     try {
         using namespace std::literals::chrono_literals;
-        return argc > 1 ? run_tcp_server(25, argc, argv) : run_posix_local_server_clients(2, 4, 10s);
+        return argc > 1 ? run_tcp_server(25, argc, argv) : run_unix_local_server_clients(2, 4, 10s);
     } catch (std::exception const &e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
     }
