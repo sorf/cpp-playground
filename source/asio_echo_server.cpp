@@ -6,13 +6,17 @@
 // - run a server that accepts clients and runs `async_repeat_echo()` for each of them, until the the operation
 //      is cancelled via a timer object passsed by the caller (see: `async_echo_server`)
 // - runs a server until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
-// - runs a server until cancelled using the given allocator (see: `async_echo_server_until_ctrl_c_allocator')
+// - runs a server until cancelled using the given allocator (see: `async_echo_server_until_ctrl_c_allocator').
+//      This is needed because we cannot bind an allocator directly to the `use_future` completion token.
 //
 // There are two top level server implementations, each of them running the server composed operation in a thread pool
 // with the `use_future` completion token (see `run_server_and_join`).
 // One top level implementation runs a TCP server until the SIGINT signal (Ctrl-C) is received (see `run_tcp_server`).
 // The other runs a UNIX domain sockets server for a fixed duration of time while clients connect to it to
 // send and receive messages (see `run_unix_local_server_clients`).
+//
+// Sample run of the UNIX domain sockets server:
+// https://wandbox.org/permlink/tpuSQxMokkiyfpak
 //
 // The implementation of the composed asynchronous operations uses these:
 // - a `shared_async_state` (see shared_async_state.hpp) base class similar to `stable_async_op_base`
