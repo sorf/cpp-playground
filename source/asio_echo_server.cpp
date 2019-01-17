@@ -63,7 +63,7 @@
 #include <vector>
 
 #if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
-#include <signal.h>
+#include <csignal>
 #endif
 
 namespace asio = boost::asio;
@@ -535,9 +535,17 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
 }
 
 // Runs the server in a thread pool.
-// At the end it joins all the threads.
+// At the end it joins all the threads, even if an exception occurs.
 template <typename Acceptor>
 auto run_server_and_join(Acceptor &acceptor, std::size_t server_thread_count, std::vector<std::thread> &threads) {
+
+    ON_SCOPE_EXIT([&threads] {
+        for (auto &t : threads) {
+            BOOST_ASSERT(t.joinable());
+            t.join();
+        }
+    });
+
     async_utils::stack_handler_memory<64> handler_memory;
     async_utils::stack_handler_allocator<void> handler_allocator(handler_memory);
 
@@ -558,9 +566,6 @@ auto run_server_and_join(Acceptor &acceptor, std::size_t server_thread_count, st
     }
 
     threads_io_work.reset();
-    for (auto &t : threads) {
-        t.join();
-    }
 }
 
 // Runs a TCP echo server.
@@ -637,7 +642,7 @@ int run_posix_local_server_clients(std::size_t server_thread_count, std::size_t 
                                      std::string_view(write_buffer.data(), write_buffer.size())
                               << std::endl;
                     read_buffer.resize(write_buffer.size());
-                    for (std::size_t r = 0; r < c; ++r) {
+                    for (std::size_t r = 0; r <= c; ++r) {
                         asio::read(socket, asio::buffer(read_buffer));
                         std::cout << boost::format("Client[%1%]: Received: %2%") % c %
                                          std::string_view(read_buffer.data(), read_buffer.size())
@@ -665,7 +670,7 @@ int run_posix_local_server_clients(std::size_t server_thread_count, std::size_t 
 int main(int argc, char **argv) {
     try {
         using namespace std::literals::chrono_literals;
-        return argc > 1 ? run_tcp_server(25, argc, argv) : run_posix_local_server_clients(6, 3, 10s);
+        return argc > 1 ? run_tcp_server(25, argc, argv) : run_posix_local_server_clients(2, 4, 10s);
     } catch (std::exception const &e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
     }
