@@ -2,6 +2,7 @@
 #define SHARED_ASYNC_STATE_HPP
 
 #include "bind_allocator.hpp"
+#include "handler_traits.hpp"
 #include "on_scope_exit.hpp"
 
 #include <atomic>
@@ -11,46 +12,10 @@
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/assert.hpp>
-#include <memory>
 #include <tuple>
 
 namespace async_utils {
 namespace asio = boost::asio;
-
-// Default allocator if none associated with the completion handler.
-using default_handler_allocator = std::allocator<void>;
-
-template <typename CompletionHandlerSignature, typename CompletionToken, typename Executor>
-struct completion_handler_traits {
-
-    // Completion type.
-    using completion_type = asio::async_completion<CompletionToken, CompletionHandlerSignature>;
-
-    // Completion handler type
-    using handler_type = typename completion_type::completion_handler_type;
-
-    // The allocator associated with a completion handler.
-    using allocator_type = asio::associated_allocator_t<handler_type, default_handler_allocator>;
-
-    // The allocator associated with the completion handler rebound for a different type.
-    template <typename T>
-    using rebound_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
-
-    // Returns the allocator associated with the handler rebound for a different type.
-    template <typename T> static decltype(auto) get_handler_allocator(handler_type const &handler) {
-        rebound_allocator_type<T> allocator = asio::get_associated_allocator(handler, default_handler_allocator{});
-        return allocator;
-    }
-
-    // The executor associated with the completion handler
-    using completion_handler_executor_type = typename asio::associated_executor<handler_type, Executor>::type;
-
-    // Returns the executor associated with the completion handler
-    static completion_handler_executor_type get_handler_executor(handler_type const &handler,
-                                                                 Executor const &executor) {
-        return asio::get_associated_executor(handler, executor);
-    }
-};
 
 // Container of the state associated with multiple asychronous operations.
 // It holds the final operation completion handler, an executor to be used as a default if the final completion handler
@@ -58,19 +23,19 @@ struct completion_handler_traits {
 // The memory used to hold the state is managed using the allocator associated with the completion handler.
 template <typename CompletionHandlerSignature, typename CompletionToken, typename Executor, typename StateData>
 class shared_async_state {
-    using handler_traits = completion_handler_traits<CompletionHandlerSignature, CompletionToken, Executor>;
+    using h_traits = handler_traits<CompletionHandlerSignature, CompletionToken, Executor>;
 
   public:
     // Completion type.
-    using completion_type = typename handler_traits::completion_type;
+    using completion_type = typename h_traits::completion_type;
     // Completion handler type generated from CompletionHandlerSignature.
-    using completion_handler_type = typename handler_traits::handler_type;
+    using handler_type = typename h_traits::handler_type;
 
     // The allocator associated with the completion handler rebound for a different type.
-    template <typename T> using rebound_allocator_type = typename handler_traits::template rebound_allocator_type<T>;
+    template <typename T> using rebound_allocator_type = typename h_traits::template rebound_allocator_type<T>;
 
     // The executor associated with the completion handler
-    using completion_handler_executor_type = typename handler_traits::completion_handler_executor_type;
+    using handler_executor_type = typename h_traits::handler_executor_type;
 
   private:
     struct state_holder;
@@ -83,9 +48,8 @@ class shared_async_state {
     // It creates a state object from a completion handler, default executor and arguments to construct the state
     // data.
     template <typename... Args>
-    explicit shared_async_state(Executor &&executor, completion_handler_type &&completion_handler, Args &&... args)
-        : m_state{} {
-        auto state_allocator{handler_traits::template get_handler_allocator<state_holder>(completion_handler)};
+    explicit shared_async_state(Executor &&executor, handler_type &&handler, Args &&... args) : m_state{} {
+        auto state_allocator{h_traits::template get_handler_allocator<state_holder>(handler)};
         auto p = state_allocator_traits::allocate(state_allocator, 1);
         bool commit = false;
         ON_SCOPE_EXIT([&] {
@@ -94,8 +58,8 @@ class shared_async_state {
                 p = nullptr;
             }
         });
-        state_allocator_traits::construct(state_allocator, std::addressof(*p), std::move(executor),
-                                          std::move(completion_handler), std::forward<Args>(args)...);
+        state_allocator_traits::construct(state_allocator, std::addressof(*p), std::move(executor), std::move(handler),
+                                          std::forward<Args>(args)...);
 
         ON_SCOPE_EXIT([&] {
             if (!commit) {
@@ -134,12 +98,12 @@ class shared_async_state {
 
     // Returns the allocator associated with the handler rebound for a different type.
     template <typename T> decltype(auto) get_handler_allocator() const {
-        return handler_traits::template get_handler_allocator<T>(m_state->completion_handler);
+        return h_traits::template get_handler_allocator<T>(m_state->handler);
     }
 
     // Returns the executor associated with the handler.
-    completion_handler_executor_type get_handler_executor() const {
-        return handler_traits::get_handler_executor(m_state->completion_handler, m_state->executor);
+    handler_executor_type get_handler_executor() const {
+        return h_traits::get_handler_executor(m_state->handler, m_state->executor);
     }
 
     // Wrap a completion handler with the executor and allocator associated with the final completion handler.
@@ -197,21 +161,21 @@ class shared_async_state {
     }
 
   private:
-    completion_handler_type release() noexcept {
+    handler_type release() noexcept {
         BOOST_ASSERT(m_state);
         auto state_allocator = get_handler_allocator<state_holder>();
-        completion_handler_type completion_handler = std::move(m_state->completion_handler);
+        handler_type handler = std::move(m_state->handler);
         state_allocator_traits::destroy(state_allocator, std::addressof(*m_state));
         state_allocator_traits::deallocate(state_allocator, m_state, 1);
         m_state = nullptr;
-        return std::move(completion_handler);
+        return std::move(handler);
     }
 
     struct state_holder {
         template <typename... Args>
-        state_holder(Executor &&executor_arg, completion_handler_type &&completion_handler, Args &&... args)
+        state_holder(Executor &&executor_arg, handler_type &&handler, Args &&... args)
             : executor(std::move(executor_arg)),
-              completion_handler(std::move(completion_handler)), io_work{asio::make_work_guard(executor)}, ref_count{1},
+              handler(std::move(handler)), io_work{asio::make_work_guard(executor)}, ref_count{1},
               state_data{std::forward<Args>(args)...} {}
 
         state_holder(state_holder const &) = delete;
@@ -221,7 +185,7 @@ class shared_async_state {
         ~state_holder() = default;
 
         Executor executor;
-        completion_handler_type completion_handler;
+        handler_type handler;
         asio::executor_work_guard<Executor> io_work;
         std::atomic_size_t ref_count;
         StateData state_data;

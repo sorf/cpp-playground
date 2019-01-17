@@ -8,24 +8,27 @@
 // - runs a server until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
 // - runs a server until cancelled using the given allocator (see: `async_echo_server_until_ctrl_c_allocator')
 //
-// This top level operation is then run in a thread pool and called with the `use_future` completion token
-// (see: 'main').
+// There are two top level server implementations, each of them running the server composed operation in a thread pool
+// with the `use_future` completion token (see `run_server_and_join`).
+// One top level implementation runs a TCP server until the SIGINT signal (Ctrl-C) is received (see `run_tcp_server`).
+// The other runs a UNIX domain sockets server for a fixed duration of time while clients connect to it to
+// send and receive messages (see `run_posix_local_server_clients`).
 //
-// The implementation of the operations use these:
-// - a `shared_async_state` base class similar to `stable_async_op_base`
+// The implementation of the composed asynchronous operations uses these:
+// - a `shared_async_state` (see shared_async_state.hpp) base class similar to `stable_async_op_base`
 //      https://github.com/boostorg/beast/blob/develop/include/boost/beast/core/async_op_base.hpp#L559
 //      but which offers shared ownership of the internal operation state data,
 //      similarly to `shared_handler_storage`
 //      https://gist.github.com/djarek/7994948863f5c5cec4054976b68ba847#file-with_timeout-cpp-L30
 //      and a way of creating completion handlers from lambda functions.
-// - a `async_composed_helpers` base class that implements common logic related to the cancelling sequence,
+// - an `add_cancel` base class that implements common logic related to the cancelling sequence,
 //      invoking the final completion handler and detecting concurrent execution of completion handlers where this is
 //      not supported.
 // - some of them use a `steady_timer` as a way to signal when they should stop.
 //      The caller sets up a timer object to never expire for each such operation and then cancels it when the operation
 //      should cancel.
 //
-#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
+//#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
 #include "bind_allocator.hpp"
@@ -39,6 +42,7 @@
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/signal_set.hpp>
@@ -47,6 +51,7 @@
 #include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/format.hpp>
+#include <boost/interprocess/streams/vectorstream.hpp>
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -57,22 +62,24 @@
 #include <tuple>
 #include <vector>
 
+#if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
+#include <signal.h>
+#endif
+
 namespace asio = boost::asio;
 using error_code = boost::system::error_code;
 
 namespace async_utils {
 
-// Temporary (in this form) helper base class.
-// It adds support for:
-// - verifying that there are no concurrent completion handlers
-// - the logic around triggerring and detecting the cancelling of asynchronous operations.
+// Helper base class for the logic around triggering and handling the cancelling of asynchronous operations.
+// It also adds support for verifying that there are no concurrent completion handlers where this is not expected.
 //
-// It expects:
+// The derived class should provide:
 //      - std::atomic_bool *Derived::executing() // optional (if it returns nullptr)
 //      - bool Derived::is_open()
 //      - Derived::cancel_impl(error_code)
 //      - Derived::try_invoke()
-template <class Derived> struct async_composed_helpers {
+template <class Derived> struct add_cancel {
   private:
     template <typename F> struct [[nodiscard]] check_scope_exit {
         explicit check_scope_exit(F && f) : m_f(std::move(f)) {}
@@ -172,15 +179,18 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
 
     using signature = void(error_code, std::size_t);
     using executor_type = typename StreamSocket::executor_type;
-    using handler_traits = async_utils::completion_handler_traits<signature, CompletionToken, executor_type>;
-    using buffer_allocator = typename handler_traits::template rebound_allocator_type<char>;
-    using buffer_t = std::vector<char, buffer_allocator>;
+    using handler_traits = async_utils::handler_traits<signature, CompletionToken, executor_type>;
+    using buffer_allocator_type = typename handler_traits::template rebound_allocator_type<char>;
+    using buffer_t = std::vector<char, buffer_allocator_type>;
 
     struct state_data {
-        state_data(StreamSocket &socket, asio::steady_timer &cancel_timer, buffer_allocator const &allocator)
-            : socket{socket}, cancel_timer{cancel_timer}, reading_buffer{max_size, allocator},
-              read_buffer{max_size, allocator}, writing_buffer{max_size, allocator},
-              write_timer{cancel_timer.get_executor().context()}, executing{}, is_open{}, total_write_size{} {}
+        state_data(StreamSocket &socket, asio::steady_timer &cancel_timer, buffer_allocator_type const &allocator)
+            : socket{socket}, cancel_timer{cancel_timer}, reading_buffer{max_size, allocator}, read_buffer{allocator},
+              writing_buffer{allocator}, write_timer{cancel_timer.get_executor().context()}, executing{}, is_open{},
+              total_write_size{} {
+            read_buffer.reserve(max_size);
+            writing_buffer.reserve(max_size);
+        }
 
         StreamSocket &socket;
         asio::steady_timer &cancel_timer;
@@ -191,22 +201,22 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
         asio::steady_timer write_timer; // periodic write timer
         std::atomic_bool executing;     // flag for detecting concurrent execution of code that is not thread-safe
         bool is_open;                   // opened (not cancelled) flag
-        error_code user_completion_error;
-        std::size_t total_write_size;
+        error_code op_error;            // operation completion error; reported to the final compeltion handler
+        std::size_t total_write_size;   // bytes sent; reported to the final compeltion handler
     };
 
-    using base_type = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
-    struct internal_op : base_type, async_utils::async_composed_helpers<internal_op> {
-        using base_type::wrap; // MSVC workaround (`this->` fails to compile in lambdas that copy `this`)
-        using async_utils::async_composed_helpers<internal_op>::check_not_concurrent;
-        using async_utils::async_composed_helpers<internal_op>::continue_handler;
-        using async_utils::async_composed_helpers<internal_op>::cancel;
+    using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
+    struct internal_op : shared_async_state, async_utils::add_cancel<internal_op> {
+        using shared_async_state::wrap; // MSVC workaround (`this->` fails to compile in lambdas that copy `this`)
+        using async_utils::add_cancel<internal_op>::check_not_concurrent;
+        using async_utils::add_cancel<internal_op>::continue_handler;
+        using async_utils::add_cancel<internal_op>::cancel;
         state_data &data;
 
-        internal_op(StreamSocket &socket, asio::steady_timer &cancel_timer, buffer_allocator const &allocator,
-                    typename base_type::completion_handler_type &&completion_handler)
-            : base_type{socket.get_executor(), std::move(completion_handler), socket, cancel_timer, allocator},
-              data{base_type::get_data()} {
+        internal_op(StreamSocket &socket, asio::steady_timer &cancel_timer, buffer_allocator_type const &allocator,
+                    typename shared_async_state::handler_type &&handler)
+            : shared_async_state{socket.get_executor(), std::move(handler), socket, cancel_timer, allocator},
+              data{shared_async_state::get_data()} {
             [[maybe_unused]] auto check = check_not_concurrent();
 
             // Waiting for the signal to cancel this
@@ -261,7 +271,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
         std::atomic_bool *executing() { return &data.executing; }
         bool is_open() const { return data.is_open; }
         void cancel_impl(error_code ec) {
-            data.user_completion_error = ec;
+            data.op_error = ec;
             data.is_open = false;
             error_code ignored;
             data.socket.cancel(ignored);
@@ -269,8 +279,8 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &cancel_timer, C
             data.write_timer.cancel();
         }
         void try_invoke() {
-            assert(!data.executing); // This ensures there is no outstanding `check_not_concurrent` scope guard.
-            this->try_invoke_move_args(data.user_completion_error, data.total_write_size);
+            BOOST_ASSERT(!data.executing); // This ensures there is no outstanding `check_not_concurrent` scope guard.
+            this->try_invoke_move_args(data.op_error, data.total_write_size);
         }
     };
 
@@ -290,12 +300,11 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
     using signature = void(error_code, std::size_t);
-    using socket_type = typename Acceptor::protocol_type::socket;
-    using endpoint_type = typename Acceptor::endpoint_type;
     using executor_type = typename Acceptor::executor_type;
-    using handler_traits = async_utils::completion_handler_traits<signature, CompletionToken, executor_type>;
-    using completion_handler_executor_type = typename handler_traits::completion_handler_executor_type;
-    using strand_type = asio::strand<completion_handler_executor_type>;
+    using socket_type = typename Acceptor::protocol_type::socket;
+    using handler_traits = async_utils::handler_traits<signature, CompletionToken, executor_type>;
+    using handler_executor_type = typename handler_traits::handler_executor_type;
+    using strand_type = asio::strand<handler_executor_type>;
 
     struct state_data {
         state_data(Acceptor &acceptor, asio::steady_timer &cancel_timer)
@@ -303,28 +312,28 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
 
         Acceptor &acceptor;
         asio::steady_timer &cancel_timer;
-        std::map<endpoint_type, std::tuple<socket_type, asio::steady_timer, strand_type>> clients;
+        std::map<std::size_t, std::tuple<socket_type, asio::steady_timer, strand_type>> clients;
         std::atomic_bool executing;
         bool is_open;
-        error_code user_completion_error;
+        error_code op_error;
         std::size_t client_count;
     };
 
-    using base_type = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
-    struct internal_op : base_type, async_utils::async_composed_helpers<internal_op> {
-        using base_type::wrap;
-        using async_utils::async_composed_helpers<internal_op>::check_not_concurrent;
-        using async_utils::async_composed_helpers<internal_op>::continue_handler;
-        using async_utils::async_composed_helpers<internal_op>::cancel;
+    using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
+    struct internal_op : shared_async_state, async_utils::add_cancel<internal_op> {
+        using shared_async_state::wrap;
+        using async_utils::add_cancel<internal_op>::check_not_concurrent;
+        using async_utils::add_cancel<internal_op>::continue_handler;
+        using async_utils::add_cancel<internal_op>::cancel;
         state_data &data;
-        completion_handler_executor_type handler_executor;
+        handler_executor_type handler_executor;
         strand_type server_strand;
 
         internal_op(Acceptor &acceptor, asio::steady_timer &cancel_timer,
-                    typename base_type::completion_handler_type &&completion_handler)
-            : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor, cancel_timer},
-              data{base_type::get_data()}, handler_executor{base_type::get_handler_executor()}, server_strand{
-                                                                                            handler_executor} {
+                    typename shared_async_state::handler_type &&handler)
+            : shared_async_state{acceptor.get_executor(), std::move(handler), acceptor, cancel_timer},
+              data{shared_async_state::get_data()}, handler_executor{shared_async_state::get_handler_executor()},
+              server_strand{handler_executor} {
             // Initiate the operations to run in the server strand
             asio::dispatch(
                 asio::bind_executor(server_strand, wrap([*this]() mutable {
@@ -360,49 +369,49 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
             }
             asio::steady_timer cancel_timer{data.acceptor.get_executor().context()};
             cancel_timer.expires_at(asio::steady_timer::time_point::max());
-            auto i =
-                data.clients.try_emplace(std::move(ep), std::move(socket), std::move(cancel_timer), handler_executor)
-                    .first;
-            ++data.client_count;
-            std::cout << boost::format("client[%1%]: Connected") % i->first << std::endl;
+            auto key = data.client_count++;
+            BOOST_ASSERT(data.clients.count(key) == 0);
+            auto i = data.clients.try_emplace(key, std::move(socket), std::move(cancel_timer), handler_executor).first;
+            std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % key % ep << std::endl;
             // Run the client operation through its own strand
             strand_type &client_strand = std::get<2>(i->second);
             asio::dispatch(asio::bind_executor(
                 client_strand, wrap([*this, i, &client_strand]() mutable {
-                    async_repeat_echo(std::get<0>(i->second), std::get<1>(i->second),
-                                      asio::bind_executor(
-                                          client_strand, wrap([*this, i](error_code ec, std::size_t bytes) mutable {
-                                              // Closing the client socket and saving any first error to log it
-                                              auto &client_socket = std::get<0>(i->second);
-                                              error_code ignored;
-                                              client_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both,
-                                                                     !ec ? ec : ignored);
-                                              client_socket.close(!ec ? ec : ignored);
-                                              std::cout << boost::format("client[%1%]: Disconnected: transferred: %2% "
-                                                                         "(closing error: %3%:%4%)") %
-                                                               i->first % bytes % ec % ec.message()
-                                                        << std::endl;
-                                              data.clients.erase(i);
-                                              // Call the final completion handler if this was the last server operation
-                                              try_invoke();
-                                          })));
+                    async_repeat_echo(
+                        std::get<0>(i->second), std::get<1>(i->second),
+                        asio::bind_executor(
+                            client_strand, wrap([*this, i](error_code ec, std::size_t bytes) mutable {
+                                // Closing the client socket and saving any first error to log it
+                                auto &client_socket = std::get<0>(i->second);
+                                error_code ignored;
+                                client_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, !ec ? ec : ignored);
+                                client_socket.close(!ec ? ec : ignored);
+                                std::cout << boost::format("Server: Client[%1%]: Disconnected: transferred: %2% "
+                                                           "(closing error: %3%:%4%)") %
+                                                 i->first % bytes % ec % ec.message()
+                                          << std::endl;
+                                data.clients.erase(i);
+                                // Call the final completion handler if this was the last server operation
+                                try_invoke();
+                            })));
                 })));
         }
 
         std::atomic_bool *executing() { return &data.executing; }
         bool is_open() const { return data.is_open; }
         void cancel_impl(error_code ec) {
-            data.user_completion_error = ec;
+            data.op_error = ec;
             data.is_open = false;
             error_code ignored;
             data.acceptor.cancel(ignored);
             for (auto &&[k, v] : data.clients) {
+                (void)k;
                 std::get<1>(v).cancel();
             }
         }
         void try_invoke() {
-            assert(!data.executing); // This ensures there is no outstanding `check_not_concurrent` scope guard.
-            this->try_invoke_move_args(data.user_completion_error, data.client_count);
+            BOOST_ASSERT(!data.executing); // This ensures there is no outstanding `check_not_concurrent` scope guard.
+            this->try_invoke_move_args(data.op_error, data.client_count);
         }
     };
 
@@ -421,9 +430,6 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
 
     using signature = void(error_code, std::size_t);
     using executor_type = typename Acceptor::executor_type;
-    using handler_traits = async_utils::completion_handler_traits<signature, CompletionToken, executor_type>;
-    using completion_handler_executor_type = typename handler_traits::completion_handler_executor_type;
-    using strand_type = asio::strand<completion_handler_executor_type>;
 
     struct state_data {
         explicit state_data(Acceptor &acceptor)
@@ -434,23 +440,23 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         asio::steady_timer cancel_timer;
         std::atomic_bool executing;
         bool is_open;
-        error_code user_completion_error;
+        error_code op_error;
         std::size_t client_count;
     };
-    using base_type =
-        async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
-    struct internal_op : base_type, async_utils::async_composed_helpers<internal_op> {
-        using base_type::wrap;
-        using async_utils::async_composed_helpers<internal_op>::check_not_concurrent;
-        using async_utils::async_composed_helpers<internal_op>::continue_handler;
-        using async_utils::async_composed_helpers<internal_op>::cancel;
+    using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
+    struct internal_op : shared_async_state, async_utils::add_cancel<internal_op> {
+        using shared_async_state::wrap;
+        using async_utils::add_cancel<internal_op>::check_not_concurrent;
+        using async_utils::add_cancel<internal_op>::continue_handler;
+        using async_utils::add_cancel<internal_op>::cancel;
         state_data &data;
-        completion_handler_executor_type handler_executor;
-        strand_type strand;
+        typename shared_async_state::handler_executor_type handler_executor;
+        asio::strand<typename shared_async_state::handler_executor_type> strand;
 
-        internal_op(Acceptor &acceptor, typename base_type::completion_handler_type &&completion_handler)
-            : base_type{acceptor.get_executor(), std::move(completion_handler), acceptor}, data{base_type::get_data()},
-              handler_executor{base_type::get_handler_executor()}, strand{base_type::get_handler_executor()} {
+        internal_op(Acceptor &acceptor, typename shared_async_state::handler_type &&handler)
+            : shared_async_state{acceptor.get_executor(), std::move(handler), acceptor},
+              data{shared_async_state::get_data()}, handler_executor{shared_async_state::get_handler_executor()},
+              strand{shared_async_state::get_handler_executor()} {
 
             // We initiate and run the waiting for CTRL-C in the strand of `this`.
             asio::dispatch(asio::bind_executor(strand, wrap([*this]() mutable {
@@ -482,15 +488,15 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         std::atomic_bool *executing() { return &data.executing; }
         bool is_open() const { return data.is_open; }
         void cancel_impl(error_code ec) {
-            data.user_completion_error = ec;
+            data.op_error = ec;
             data.is_open = false;
             data.cancel_timer.cancel();
             error_code ignored;
             data.signals.cancel(ignored);
         }
         void try_invoke() {
-            assert(!data.executing);
-            this->try_invoke_move_args(data.user_completion_error, data.client_count);
+            BOOST_ASSERT(!data.executing);
+            this->try_invoke_move_args(data.op_error, data.client_count);
         }
     };
 
@@ -505,15 +511,14 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
     -> typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
     using signature = void(error_code, std::size_t);
+    using executor_type = typename Acceptor::executor_type;
     struct state_data {};
 
-    using base_type =
-        async_utils::shared_async_state<signature, CompletionToken, asio::io_context::executor_type, state_data>;
-    struct internal_op : base_type {
-        using base_type::invoke; // MSVC workaround (`this->invoke()` fails to compile in the lambda)
-        internal_op(Acceptor &acceptor, Allocator const &allocator,
-                    typename base_type::completion_handler_type &&completion_handler)
-            : base_type{acceptor.get_executor(), std::move(completion_handler)} {
+    using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
+    struct internal_op : shared_async_state {
+        using shared_async_state::invoke; // MSVC workaround (`this->invoke()` fails to compile in the lambda)
+        internal_op(Acceptor &acceptor, Allocator const &allocator, typename shared_async_state::handler_type &&handler)
+            : shared_async_state{acceptor.get_executor(), std::move(handler)} {
 
             // We don't need any synchronization here as we start a single asynchronous operation.
             async_echo_server_until_ctrl_c(
@@ -529,57 +534,140 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
     return completion.result.get();
 }
 
-int main(int argc, char **argv) {
+// Runs the server in a thread pool.
+// At the end it joins all the threads.
+template <typename Acceptor>
+auto run_server_and_join(Acceptor &acceptor, std::size_t server_thread_count, std::vector<std::thread> &threads) {
+    async_utils::stack_handler_memory<64> handler_memory;
+    async_utils::stack_handler_allocator<void> handler_allocator(handler_memory);
+
+    // Run the server in a thread-pool and we wait for its completion with a future.
+    auto &io_context = acceptor.get_executor().context().get_executor().context();
+    auto threads_io_work = asio::make_work_guard(io_context);
+    for (std::size_t i = 0; i < server_thread_count; ++i) {
+        threads.emplace_back([&io_context] { io_context.run(); });
+    }
+
+    std::future<std::size_t> f =
+        async_echo_server_until_ctrl_c_allocator(acceptor, handler_allocator, asio::use_future);
+    try {
+        auto client_count = f.get();
+        std::cout << boost::format("Server: Stopped: client-count: %1%") % client_count << std::endl;
+    } catch (std::exception const &e) {
+        std::cout << "Server: Run error: " << e.what() << std::endl;
+    }
+
+    threads_io_work.reset();
+    for (auto &t : threads) {
+        t.join();
+    }
+}
+
+// Runs a TCP echo server.
+int run_tcp_server(std::size_t server_thread_count, int argc, char **argv) {
+    char const *arg_program = argv[0]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     if (argc != 3) {
-        std::cerr << "Usage: echo-op <address> <port>\n"
+        std::cerr << "Usage as a TCP server: " << arg_program << " <address> <port>\n"
                   << "Example:\n"
-                  << "    echo-op 0.0.0.0 8080\n";
+                  << "    " << arg_program << " 0.0.0.0 8080" << std::endl;
         return 1;
     }
-    char const *arg_program = argv[0]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     char const *arg_address = argv[1]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     char const *arg_port = argv[2];    // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    try {
-        auto const address{asio::ip::make_address(arg_address)};
-        auto const port{static_cast<std::uint16_t>(std::strtol(arg_port, nullptr, 0))};
 
-        async_utils::stack_handler_memory<64> handler_memory;
-        async_utils::stack_handler_allocator<void> handler_allocator(handler_memory);
+    auto const address{asio::ip::make_address(arg_address)};
+    auto const port{static_cast<std::uint16_t>(std::strtol(arg_port, nullptr, 0))};
+    asio::ip::tcp::endpoint ep{address, port};
+    std::cout << boost::format("Server: Starting on: %1%") % ep << std::endl;
 
-        asio::io_context io_context;
-        asio::ip::tcp::acceptor acceptor{io_context};
-        asio::ip::tcp::endpoint ep{address, port};
-        acceptor.open(ep.protocol());
-        acceptor.set_option(asio::socket_base::reuse_address(true));
-        acceptor.bind(ep);
-        acceptor.listen();
+    asio::io_context io_context;
+    asio::ip::tcp::acceptor acceptor{io_context};
 
-        // We run the server in a thread-pool and we wait for completion with a future.
-        auto threads_io_work = asio::make_work_guard(io_context.get_executor());
-        std::vector<std::thread> threads;
-        unsigned thread_count = 25;
-        threads.reserve(thread_count);
-        for (unsigned i = 0; i < thread_count; ++i) {
-            threads.emplace_back([&io_context] { io_context.run(); });
-        }
+    acceptor.open(ep.protocol());
+    acceptor.set_option(asio::socket_base::reuse_address(true));
+    acceptor.bind(ep);
+    acceptor.listen();
 
-        std::cout << boost::format("Server: Starting on: %1%") % ep << std::endl;
-        std::future<std::size_t> f =
-            async_echo_server_until_ctrl_c_allocator(acceptor, handler_allocator, asio::use_future);
-        try {
-            auto client_count = f.get();
-            std::cout << boost::format("Server: Stopped: client-count: %1%") % client_count << std::endl;
-        } catch (std::exception const &e) {
-            std::cout << "Server: Run error: " << e.what() << std::endl;
-        }
-
-        threads_io_work.reset();
-        for (auto &t : threads) {
-            t.join();
-        }
-
-    } catch (std::exception const &e) {
-        std::cerr << arg_program << ": Fatal error: " << e.what() << std::endl;
-    }
+    std::vector<std::thread> threads;
+    threads.reserve(server_thread_count);
+    run_server_and_join(acceptor, server_thread_count, threads);
     return 0;
+}
+
+// Runs a UNIX domain sockets server and clients connecting to it.
+template <typename Duration>
+int run_posix_local_server_clients(std::size_t server_thread_count, std::size_t client_thread_count,
+                                   Duration run_duration) {
+#if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
+    char const *test_file = "_TMP_local_server_test";
+    std::remove(test_file);
+    asio::local::stream_protocol::endpoint ep{test_file};
+    std::cout << boost::format("Server: Starting on: %1%") % ep << std::endl;
+
+    asio::io_context io_context;
+    asio::local::stream_protocol::acceptor acceptor{io_context, ep};
+
+    std::vector<std::thread> threads;
+    threads.reserve(1 + client_thread_count + server_thread_count);
+
+    // 1st thread will signal CTRL-C after a while
+    threads.emplace_back([&] {
+        std::this_thread::sleep_for(run_duration);
+        ::raise(SIGINT);
+    });
+
+    // The client threads can start as the server acceptor is already set up.
+    for (std::size_t c = 0; c < client_thread_count; ++c) {
+        threads.emplace_back([c, ep, &io_context] {
+            try {
+                std::cout << boost::format("Client[%1%]: Started") % c << std::endl;
+                asio::local::stream_protocol::socket socket{io_context};
+                socket.connect(ep);
+                std::cout << boost::format("Client[%1%]: Connected") % c << std::endl;
+
+                std::size_t message_count = 0;
+                boost::interprocess::basic_ovectorstream<std::vector<char>> stream;
+                std::vector<char> write_buffer, read_buffer;
+                while (true) {
+                    stream.rdbuf()->clear();
+                    stream << boost::format("message %1% from client %2%") % message_count++ % c;
+                    stream.swap_vector(write_buffer);
+                    asio::write(socket, asio::buffer(write_buffer));
+                    std::cout << boost::format("Client[%1%]: Sent: %2%") % c %
+                                     std::string_view(write_buffer.data(), write_buffer.size())
+                              << std::endl;
+                    read_buffer.resize(write_buffer.size());
+                    for (std::size_t r = 0; r < c; ++r) {
+                        asio::read(socket, asio::buffer(read_buffer));
+                        std::cout << boost::format("Client[%1%]: Received: %2%") % c %
+                                         std::string_view(read_buffer.data(), read_buffer.size())
+                                  << std::endl;
+                    }
+                }
+
+            } catch (std::exception const &e) {
+                std::cout << boost::format("Client[%1%]: Error: %2%") % c % e.what() << std::endl;
+            }
+        });
+    }
+
+    run_server_and_join(acceptor, server_thread_count, threads);
+    return 0;
+#else
+    (void)server_thread_count;
+    (void)client_thread_count;
+    (void)run_duration;
+    std::cerr << "Local sockets are not supported" << std::endl;
+    return 1;
+#endif
+}
+
+int main(int argc, char **argv) {
+    try {
+        using namespace std::literals::chrono_literals;
+        return argc > 1 ? run_tcp_server(25, argc, argv) : run_posix_local_server_clients(6, 3, 10s);
+    } catch (std::exception const &e) {
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+    }
+    return 1;
 }

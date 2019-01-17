@@ -74,7 +74,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
         state_data &data;
 
         internal_op(asio::io_context &io_context, bool &user_resource, std::chrono::steady_clock::duration run_duration,
-                    typename base_type::completion_handler_type &&completion_handler)
+                    typename base_type::handler_type &&completion_handler)
             : base_type{io_context.get_executor(), std::move(completion_handler), io_context, user_resource},
               data{base_type::get_data()} {
 

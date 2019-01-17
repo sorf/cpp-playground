@@ -40,7 +40,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
         state_data &data;
 
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
-                    typename base_type::completion_handler_type &&completion_handler)
+                    typename base_type::handler_type &&completion_handler)
             : base_type{io_context.get_executor(), std::move(completion_handler), io_context, run_duration},
               data{base_type::get_data()} {
             start_one_wait();
