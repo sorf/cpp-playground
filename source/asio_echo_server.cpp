@@ -147,7 +147,10 @@ template <class Derived> struct add_stop {
         return continue_handler(ec, &check_scope_exit);
     }
 
-    // Initiates the stopping of the operation and attempts to call the final completion handler.
+    // Initiates the stopping of the asynchronous operations initiated by the base class
+    // and attempts to call the final completion handler.
+    // 
+    // Note: The actual implementation of the stopping is in Derived::stop_impl().
     template <typename CheckScopeExit = std::optional<unsigned>>
     void stop(error_code ec, CheckScopeExit *check_scope_exit = nullptr) {
         auto *pthis = static_cast<Derived *>(this);
