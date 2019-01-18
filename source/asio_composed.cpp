@@ -30,13 +30,17 @@ namespace {
 using error_code = boost::system::error_code;
 
 // A composed operations that runs many timer wait operations both in parallel and in series.
+// By operation run in parallel is meant: multiple outstanding asynchronous operations simultaneously.
+// By operations run in series: only one asynchronous operation outstanding at any given time.
+//
+// As this operation does not support true parallelism - multiple completion handlers executing simultaneously -
+// the caller is responsible for ensuring that this initiation call and the completion handlers of all the internal
+// operations are running from the same implicit or explicit strand.
+//
 // The operation receives a user resource (a bool value) that is accessed each time an internal timer wait operation
 // completes.This way we test that all the internal operations happen only as part of this user called composed
 // operation - no internal operation should execute once the completion callback of the composed operation has been
 // called (or scheduled to be called).
-//
-// The caller is responsible for ensuring that the this call and all the internal operations are running from the same
-// implicit or explicit strand.
 template <typename CompletionToken>
 auto async_many_timers(asio::io_context &io_context, bool &user_resource,
                        std::chrono::steady_clock::duration run_duration, CompletionToken &&token) ->
@@ -62,7 +66,7 @@ auto async_many_timers(asio::io_context &io_context, bool &user_resource,
         error_code user_completion_error;
         asio::steady_timer run_timer;
         std::vector<asio::steady_timer> internal_timers;
-        // Atomic flag to detect if internal completion handlers run in parallel.
+        // Atomic flag to detect if internal completion handlers run simultaneously.
         std::atomic_bool executing;
         // If this is not opened anymore, close() has no effect.
         bool is_open;

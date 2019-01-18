@@ -1,6 +1,11 @@
 // Composing asynchronous operations up to an echo server that gracefully shuts down on CTRL-C.
 //
-// The example shows writing and composing these operations:
+// This example shows writing and composing asynchronous operations.
+// Some of these composed operations are multi-chain (they consist of multiple flows of execution) which means
+// that they can have multiple outstanding asynchronous operations simultaneously. This requires that
+// the final completion handler has to be called only when the last of them completes.
+//
+// The operations implemented in this example are:
 // - read data from a socket and write it back periodically until an error occurs or the operation is cancelled
 //      via a timer object passsed by the caller (see: `async_repeat_echo`)
 // - run a server that accepts clients and runs `async_repeat_echo()` for each of them, until the the operation
@@ -76,7 +81,8 @@ using error_code = boost::system::error_code;
 namespace async_utils {
 
 // Helper base class for the logic around triggering and handling the cancelling of asynchronous operations.
-// It also adds support for verifying that there are no concurrent completion handlers where this is not expected.
+// It also adds support for verifying that there are no completion handlers executing simultaneously
+// where this is not expected.
 //
 // The derived class should provide:
 //      - std::atomic_bool *Derived::executing() // optional (if it returns nullptr)
@@ -168,8 +174,10 @@ template <class Derived> struct add_cancel {
 // Note: `cancel_timer.async_wait()` completing with `asio::error::operation_aborted` is not an error, it is considered
 // the normal way to cancel the execution of this operation.
 //
-// The caller is responsible for ensuring that this initiation call and all the internal operations are running
-// from the same implicit or explicit strand.
+// This is a multi-chain composed operations as it may have multiple outstanding asynchronous operations simultaneously.
+// But, as this operation does not support true parallelism - multiple completion handlers executing simultaneously -
+// the caller is responsible for ensuring that this initiation call and the completion handlers of all the internal
+// operations are running from the same implicit or explicit strand.
 //
 // This operation is based on these two examples:
 // - `async_write_messages()` from
