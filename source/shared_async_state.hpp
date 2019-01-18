@@ -168,7 +168,7 @@ class shared_async_state {
         state_allocator_traits::destroy(state_allocator, std::addressof(*m_state));
         state_allocator_traits::deallocate(state_allocator, m_state, 1);
         m_state = nullptr;
-        return std::move(handler);
+        return handler;
     }
 
     struct state_holder {
