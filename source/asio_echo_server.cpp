@@ -62,7 +62,7 @@
 #include <cassert>
 #include <chrono>
 #include <iostream>
-#include <map>
+#include <list>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -323,7 +323,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
 
         Acceptor &acceptor;
         asio::steady_timer &cancel_timer;
-        std::map<std::size_t, std::tuple<socket_type, asio::steady_timer, strand_type>> clients;
+        std::list<std::tuple<socket_type, asio::steady_timer, strand_type, std::size_t>> clients;
         std::atomic_bool executing;
         bool is_open;
         error_code op_error;
@@ -382,28 +382,29 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
 #ifndef __clang_analyzer__ // Silence: bugprone-use-after-move
             cancel_timer.expires_at(asio::steady_timer::time_point::max());
 #endif
-            auto key = data.client_count++;
-            BOOST_ASSERT(data.clients.count(key) == 0); // We must not invalidate iterators to existing clients.
-            auto i = data.clients.try_emplace(key, std::move(socket), std::move(cancel_timer), handler_executor).first;
-            std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % key % ep << std::endl;
+            auto id = data.client_count++;
+            data.clients.emplace_back(std::move(socket), std::move(cancel_timer), handler_executor, id);
+            auto iter = data.clients.end();
+            --iter;
+            std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % id % ep << std::endl;
             // Run the client operation through its own strand
-            strand_type &client_strand = std::get<2>(i->second);
+            strand_type &client_strand = std::get<2>(*iter);
             asio::dispatch(asio::bind_executor(
-                client_strand, wrap([*this, i, &client_strand]() mutable {
+                client_strand, wrap([*this, iter, &client_strand]() mutable {
                     async_repeat_echo(
-                        std::get<0>(i->second), std::get<1>(i->second),
+                        std::get<0>(*iter), std::get<1>(*iter),
                         asio::bind_executor(
-                            client_strand, wrap([*this, i](error_code ec, std::size_t bytes) mutable {
+                            client_strand, wrap([*this, iter](error_code ec, std::size_t bytes) mutable {
                                 // Closing the client socket and saving any first error to log it
-                                auto &client_socket = std::get<0>(i->second);
+                                auto &client_socket = std::get<0>(*iter);
                                 error_code ignored;
                                 client_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, !ec ? ec : ignored);
                                 client_socket.close(!ec ? ec : ignored);
                                 std::cout << boost::format("Server: Client[%1%]: Disconnected: transferred: %2% "
                                                            "(closing error: %3%:%4%)") %
-                                                 i->first % bytes % ec % ec.message()
+                                                 std::get<3>(*iter) % bytes % ec % ec.message()
                                           << std::endl;
-                                data.clients.erase(i);
+                                data.clients.erase(iter);
                                 // Call the final completion handler if this was the last server operation
                                 try_invoke();
                             })));
@@ -417,9 +418,8 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &cancel_timer, Com
             data.is_open = false;
             error_code ignored;
             data.acceptor.cancel(ignored);
-            for (auto &&[k, v] : data.clients) {
-                (void)k;
-                std::get<1>(v).cancel();
+            for (auto &c : data.clients) {
+                std::get<1>(c).cancel();
             }
         }
         void try_invoke() {
