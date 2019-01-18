@@ -20,8 +20,6 @@
 // The other runs a UNIX domain sockets server for a fixed duration of time while clients connect to it to
 // send and receive messages (see `run_unix_local_server_clients`).
 //
-// Sample run of the UNIX domain sockets server:
-// https://wandbox.org/permlink/tpuSQxMokkiyfpak
 //
 // The implementation of the composed asynchronous operations uses these:
 // - a `shared_async_state` (see shared_async_state.hpp) base class similar to `stable_async_op_base`
@@ -118,14 +116,15 @@ template <class Derived> struct add_cancel {
     decltype(auto) check_not_concurrent() {
         auto *pthis = static_cast<Derived *>(this);
         std::atomic_bool *executing_ptr = pthis->executing();
-        BOOST_ASSERT(!executing_ptr || !*executing_ptr);
         if (executing_ptr != nullptr) {
-            *executing_ptr = true;
+            bool was_executing = executing_ptr->exchange(true);
+            BOOST_ASSERT(!was_executing);
         }
+
         return make_check_scope_exit([executing_ptr] {
-            BOOST_ASSERT(!executing_ptr || *executing_ptr);
             if (executing_ptr != nullptr) {
-                *executing_ptr = false;
+                bool was_executing = executing_ptr->exchange(false);
+                BOOST_ASSERT(was_executing);
             }
         });
     }
