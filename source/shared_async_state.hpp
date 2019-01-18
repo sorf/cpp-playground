@@ -48,7 +48,7 @@ class shared_async_state {
     // It creates a state object from a completion handler, default executor and arguments to construct the state
     // data.
     template <typename... Args>
-    explicit shared_async_state(Executor &&executor, handler_type &&handler, Args &&... args) : m_state{} {
+    explicit shared_async_state(Executor const &executor, handler_type &&handler, Args &&... args) : m_state{} {
         auto state_allocator{h_traits::template get_handler_allocator<state_holder>(handler)};
         auto p = state_allocator_traits::allocate(state_allocator, 1);
         bool commit = false;
@@ -58,7 +58,7 @@ class shared_async_state {
                 p = nullptr;
             }
         });
-        state_allocator_traits::construct(state_allocator, std::addressof(*p), std::move(executor), std::move(handler),
+        state_allocator_traits::construct(state_allocator, std::addressof(*p), executor, std::move(handler),
                                           std::forward<Args>(args)...);
 
         ON_SCOPE_EXIT([&] {
@@ -115,7 +115,7 @@ class shared_async_state {
         // Note: bind_executor() followed by bind_allocator() fails to compile if the result of this wrap() function
         // is bound to a strand, e.g. if calling:
         //      asio::bind_executor(strand, wrap(...))
-        return bind_allocator(std::move(allocator), asio::bind_executor(std::move(executor), std::forward<F>(f)));
+        return bind_allocator(std::move(allocator), asio::bind_executor(executor, std::forward<F>(f)));
     }
 
     // Tests that this is the only instance sharing the state data.
@@ -173,9 +173,8 @@ class shared_async_state {
 
     struct state_holder {
         template <typename... Args>
-        state_holder(Executor &&executor_arg, handler_type &&handler, Args &&... args)
-            : executor(std::move(executor_arg)),
-              handler(std::move(handler)), io_work{asio::make_work_guard(executor)}, ref_count{1},
+        state_holder(Executor const &executor, handler_type &&handler, Args &&... args)
+            : executor(executor), handler(std::move(handler)), io_work{asio::make_work_guard(executor)}, ref_count{1},
               state_data{std::forward<Args>(args)...} {}
 
         state_holder(state_holder const &) = delete;

@@ -609,7 +609,7 @@ int run_tcp_server(std::size_t server_thread_count, int argc, char **argv) {
 // Runs a UNIX domain sockets server and clients connecting to it.
 template <typename Duration>
 int run_unix_local_server_clients(std::size_t server_thread_count, std::size_t client_thread_count,
-                                   Duration run_duration) {
+                                  Duration run_duration) {
 #if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
     char const *test_file = "_TMP_local_server_test";
     std::remove(test_file);

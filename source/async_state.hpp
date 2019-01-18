@@ -40,9 +40,8 @@ class async_state {
     //
     // It creates a state object from a completion handler, default executor and arguments to construct the state data.
     template <class... Args>
-    explicit async_state(completion_handler_type &&completion_handler, Executor &&executor, Args &&... args)
-        : m_state{async_state::make_state(std::move(completion_handler), std::move(executor),
-                                          std::forward<Args>(args)...)} {}
+    explicit async_state(completion_handler_type &&completion_handler, Executor const&executor, Args &&... args)
+        : m_state{async_state::make_state(std::move(completion_handler), executor, std::forward<Args>(args)...)} {}
 
     async_state(async_state const &) = delete;
     async_state(async_state &&) noexcept = default;
@@ -71,7 +70,7 @@ class async_state {
             BOOST_ASSERT(m_state->io_work.owns_work());
             auto allocator = asio::get_associated_allocator(m_state->completion_handler, default_allocator{});
             auto executor = asio::get_associated_executor(m_state->completion_handler, m_state->executor);
-            return asio::bind_executor(std::move(executor), bind_allocator(std::move(allocator), std::forward<F>(f)));
+            return asio::bind_executor(executor, bind_allocator(std::move(allocator), std::forward<F>(f)));
         }
 
       private:
@@ -95,9 +94,9 @@ class async_state {
 
   private:
     struct state_holder_base {
-        state_holder_base(completion_handler_type &&completion_handler, Executor &&executor_arg)
+        state_holder_base(completion_handler_type &&completion_handler, Executor const &executor)
             : completion_handler(std::move(completion_handler)),
-              executor(std::move(executor_arg)), io_work{asio::make_work_guard(executor)} {}
+              executor(executor), io_work{asio::make_work_guard(executor)} {}
 
         completion_handler_type completion_handler;
         Executor executor;
@@ -106,9 +105,8 @@ class async_state {
 
     struct state_holder : public state_holder_base, public StateData {
         template <class... Args>
-        state_holder(completion_handler_type &&completion_handler, Executor &&executor, Args &&... args)
-            : state_holder_base(std::move(completion_handler), std::move(executor)),
-              StateData(std::forward<Args>(args)...) {}
+        state_holder(completion_handler_type &&completion_handler, Executor const &executor, Args &&... args)
+            : state_holder_base(std::move(completion_handler), executor), StateData(std::forward<Args>(args)...) {}
     };
 
     using state_allocator_type =
@@ -130,7 +128,7 @@ class async_state {
     using state_holder_ptr = std::unique_ptr<state_holder, state_deleter>;
 
     template <class... Args>
-    static state_holder_ptr make_state(completion_handler_type &&completion_handler, Executor &&executor,
+    static state_holder_ptr make_state(completion_handler_type &&completion_handler, Executor const &executor,
                                        Args &&... args);
 
     state_holder_ptr m_state;
@@ -138,8 +136,8 @@ class async_state {
 
 template <typename CompletionHandlerSignature, typename CompletionToken, typename Executor, typename StateData>
 template <class... Args>
-inline auto async_state<CompletionHandlerSignature, CompletionToken, Executor, StateData>::make_state(
-    completion_handler_type &&completion_handler, Executor &&executor, Args &&... args) -> state_holder_ptr {
+auto async_state<CompletionHandlerSignature, CompletionToken, Executor, StateData>::make_state(
+    completion_handler_type &&completion_handler, Executor const &executor, Args &&... args) -> state_holder_ptr {
 
     static_assert(!std::is_array<StateData>::value);
     state_allocator_type state_allocator{asio::get_associated_allocator(completion_handler, default_allocator{})};
@@ -151,8 +149,8 @@ inline auto async_state<CompletionHandlerSignature, CompletionToken, Executor, S
             p = nullptr;
         }
     };
-    state_allocator_traits::construct(state_allocator, std::addressof(*p), std::move(completion_handler),
-                                      std::move(executor), std::forward<Args>(args)...);
+    state_allocator_traits::construct(state_allocator, std::addressof(*p), std::move(completion_handler), executor,
+                                      std::forward<Args>(args)...);
     BOOST_SCOPE_EXIT_ALL(&) {
         if (!commit) {
             state_allocator_traits::destroy(state_allocator, std::addressof(*p));
