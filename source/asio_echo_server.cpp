@@ -1,16 +1,29 @@
 // Composing asynchronous operations up to an echo server that gracefully shuts down on CTRL-C.
 //
-// This example shows writing and composing asynchronous operations.
-// Some of these composed operations are multi-chain (they consist of multiple flows of execution) which means
-// that they can have multiple outstanding asynchronous operations simultaneously. This requires that
-// the final completion handler has to be called only when the last of them completes.
+// These are the main aspects addressed by this example:
+// - composing asynchronous operations using lambdas for the completion handlers
+//      The `shared_async_state::wrap` member function helps this.
+// - multi-chain (*) composed operations
+//      These operations have multiple outstanding asynchronous operations at the same time which means that
+//      the final completion handler can be called only when the last of them completes.
+//      The shared part of the `shared_async_state` base class helps this.
+// - stopping these composed operations
+//      This example shows how a timer object can be used as a way to signal an operation that it should stop its
+//      execution. This means triggering the stopping of the internal operations, ignore any errors that they may report
+//      as a result of this and ensure no new operations are initiated.
+//      When all the pending internal operations have completed, the final completion handler will be called.
+//      The `add_stop` base class helps implementing this aspect.
+//
+//  [*] the meaning of the term `chain` is taken from here:
+//  https://www.boost.org/doc/libs/1_69_0/doc/html/boost_asio/overview/core/strands.html
+//  "a [...] chain of asynchronous operations associated with a connection"
 //
 // The operations implemented in this example are:
 // - read data from a socket and write it back periodically until an error occurs or the operation is stopped
-//      via a timer object passsed by the caller (see: `async_repeat_echo`)
+//      via a timer object passed by the caller (see: `async_repeat_echo`)
 // - run a server that accepts clients and runs `async_repeat_echo()` for each of them, until the the operation
-//      is stopped via a timer object passsed by the caller (see: `async_echo_server`)
-// - runs a server until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
+//      is stopped via a timer object passed by the caller (see: `async_echo_server`)
+// - runs the server operation until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
 // - runs a server until stopped using the given allocator (see: `async_echo_server_until_ctrl_c_allocator').
 //      This is needed because we cannot bind an allocator directly to the `use_future` completion token.
 //
