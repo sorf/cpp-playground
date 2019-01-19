@@ -12,6 +12,7 @@
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/assert.hpp>
+#include <boost/log/utility/unique_identifier_name.hpp>
 #include <tuple>
 
 namespace async_utils {
@@ -110,6 +111,7 @@ class shared_async_state {
     template <typename F> decltype(auto) wrap(F &&f) const {
         BOOST_ASSERT(m_state);
         BOOST_ASSERT(m_state->io_work.owns_work());
+
         auto allocator = this->get_handler_allocator<void>();
         auto executor = this->get_handler_executor();
         // Note: bind_executor() followed by bind_allocator() fails to compile if the result of this wrap() function
@@ -127,6 +129,10 @@ class shared_async_state {
     // from this state.
     template <typename... Args> void invoke(Args &&... args) {
         BOOST_ASSERT(unique());
+        if (debug_check_not_concurrent_scope_exit *p = m_state->debug_check_not_concurrent_scope_exit_p) {
+            p->reset();
+        }
+        BOOST_ASSERT(m_state->debug_check_not_concurrent_scope_exit_p == nullptr);
         auto handler = release();
         std::invoke(handler, std::forward<Args>(args)...);
     }
@@ -160,6 +166,13 @@ class shared_async_state {
         }
     }
 
+    // Returns a scope guard object that ensures there are no concurrent accesses until its destruction or
+    // invoke() is called.
+    decltype(auto) debug_check_not_concurrent() {
+        BOOST_ASSERT(m_state);
+        return debug_check_not_concurrent_scope_exit(*m_state);
+    }
+
   private:
     handler_type release() noexcept {
         BOOST_ASSERT(m_state);
@@ -171,11 +184,12 @@ class shared_async_state {
         return handler;
     }
 
+    struct debug_check_not_concurrent_scope_exit;
     struct state_holder {
         template <typename... Args>
         state_holder(Executor const &executor, handler_type &&handler, Args &&... args)
             : executor(executor), handler(std::move(handler)), io_work{asio::make_work_guard(executor)}, ref_count{1},
-              state_data{std::forward<Args>(args)...} {}
+              debug_check_not_concurrent_scope_exit_p{}, state_data{std::forward<Args>(args)...} {}
 
         state_holder(state_holder const &) = delete;
         state_holder(state_holder &&) = delete;
@@ -187,10 +201,41 @@ class shared_async_state {
         handler_type handler;
         asio::executor_work_guard<Executor> io_work;
         std::atomic_size_t ref_count;
+        std::atomic<debug_check_not_concurrent_scope_exit *> debug_check_not_concurrent_scope_exit_p;
+
         StateData state_data;
     };
     state_holder *m_state;
+
+    struct [[nodiscard]] debug_check_not_concurrent_scope_exit {
+        explicit debug_check_not_concurrent_scope_exit(state_holder & state) : m_state(&state) {
+            void *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(this);
+            BOOST_ASSERT(was_executing == nullptr);
+        }
+        debug_check_not_concurrent_scope_exit(debug_check_not_concurrent_scope_exit const &) = delete;
+        debug_check_not_concurrent_scope_exit(debug_check_not_concurrent_scope_exit &&) = delete;
+        debug_check_not_concurrent_scope_exit &operator=(debug_check_not_concurrent_scope_exit const &) = delete;
+        debug_check_not_concurrent_scope_exit &operator=(debug_check_not_concurrent_scope_exit &&other) = delete;
+        ~debug_check_not_concurrent_scope_exit() { reset(); }
+        void reset() noexcept {
+            if (m_state) {
+                void *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(nullptr);
+                BOOST_ASSERT(was_executing == this);
+                m_state = nullptr;
+            }
+        }
+
+      private:
+        state_holder *m_state;
+    };
 };
+
+// Calls debug_check_not_concurrent().
+// Note: This should call this->debug_check_not_concurrent() but this fails to compile in MSVC when called
+// from lambda functions that copy this as value.
+#define DEBUG_CHECK_NOT_CONCURRENT()                                                                                   \
+    [[maybe_unused]] auto BOOST_LOG_UNIQUE_IDENTIFIER_NAME(debug_check_not_concurrent_guard) =                         \
+        debug_check_not_concurrent()
 
 } // namespace async_utils
 

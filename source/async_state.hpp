@@ -40,7 +40,7 @@ class async_state {
     //
     // It creates a state object from a completion handler, default executor and arguments to construct the state data.
     template <class... Args>
-    explicit async_state(completion_handler_type &&completion_handler, Executor const&executor, Args &&... args)
+    explicit async_state(completion_handler_type &&completion_handler, Executor const &executor, Args &&... args)
         : m_state{async_state::make_state(std::move(completion_handler), executor, std::forward<Args>(args)...)} {}
 
     async_state(async_state const &) = delete;
