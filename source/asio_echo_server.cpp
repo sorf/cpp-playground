@@ -42,7 +42,7 @@
 // - trying to invoke the final completion handler only when there is a single owner of the state holding it
 //      see: `shared_async_state::try_invoke_move_args`
 // - a debug utility for checking that completion handlers do not execute concurrently where this is not supported
-//      see: `shared_async_state::debug_check_not_concurrent
+//      see: `shared_async_state::debug_check_not_concurrent`
 //
 //#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
@@ -144,6 +144,7 @@ auto async_repeat_echo(StreamSocket &socket, CompletionToken &&token) ->
             // Start reading and the periodic write back
             // Note: By having both `socket.async_read_some` and `write_timer.async_wait` outstanding at the same time
             // we ensure that if the remote side closes the connection, we detect this immediately.
+            // And to serve as a multi-chain composed operation example.
             start_read();
             start_wait_write();
             data.is_open = true;
