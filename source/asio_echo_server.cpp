@@ -5,16 +5,15 @@
 //      Lambda completion functions are bound to the executor and allocator associated with the final completion
 //      handler.
 // - multi-chain (*) composed operations
-//      These operations have multiple outstanding asynchronous operations at the same time which means
+//      Their implementation has multiple outstanding asynchronous operations at the same time which means
 //      the final completion handler can be called only when the last of them completes.
-//      The shared part of the `shared_async_state` base class helps this.
 // - stopping these multi-chain composed operations
-//      As a result of an error or a stop signal, each such operation stops its internal operations,
+//      As a result of an error or a graceful-stop signal, each such operation stops its internal operations,
 //      ignores any subsequent errors that they might report and ensures no new operations are initiated.
 //      When all the pending internal operations have completed, the final completion handler will be called.
 //      This example shows how a timer object or waiting for a signal can be used as graceful-stop signals.
 //
-//  [*] the meaning of the term `chain` is taken from here:
+//  [*] the term `chain` is borrowed from here:
 //  https://www.boost.org/doc/libs/1_69_0/doc/html/boost_asio/overview/core/strands.html
 //  "a [...] chain of asynchronous operations associated with a connection"
 //
