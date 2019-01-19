@@ -9,7 +9,7 @@ C++ testing playground.
 conan install . --install-folder=tmp/build-ct -pr profiles/linux-64-clang-7-libstdc++-release-tidy
 conan build . --install-folder=tmp/build-ct --build-folder=tmp/build-ct
 
-conan install . --install-folder=tmp/build-gd -pr profiles/linux-64-gcc-7-libstdc++11-debug
+conan install . --install-folder=tmp/build-gd -pr profiles/linux-64-gcc-8-libstdc++11-debug
 conan build . --install-folder=tmp/build-gd --build-folder=tmp/build-gd
 
 ### Windows (MSVC)

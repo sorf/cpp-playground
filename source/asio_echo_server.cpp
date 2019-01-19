@@ -2,25 +2,25 @@
 //
 // These are the main aspects addressed by this example:
 // - composing asynchronous operations using lambdas for the completion handlers
-//      The `shared_async_state::wrap` member function helps this.
+//      Lambda completion functions are bound to the executor and allocator associated with the final completion
+//      handler.
 // - multi-chain (*) composed operations
 //      These operations have multiple outstanding asynchronous operations at the same time which means
 //      the final completion handler can be called only when the last of them completes.
 //      The shared part of the `shared_async_state` base class helps this.
-// - stopping these composed operations
-//      This example shows how a timer object can be used as a way to signal an operation that it should stop its
-//      execution. This means triggering the stopping of the internal operations, ignore any errors that they may report
-//      as a result of this and ensure no new operations are initiated.
+// - stopping these multi-chain composed operations
+//      As a result of an error or a stop signal, each such operation stops its internal operations,
+//      ignores any subsequent errors that they might report and ensures no new operations are initiated.
 //      When all the pending internal operations have completed, the final completion handler will be called.
+//      This example shows how a timer object or waiting for a signal can be used as graceful-stop signals.
 //
 //  [*] the meaning of the term `chain` is taken from here:
 //  https://www.boost.org/doc/libs/1_69_0/doc/html/boost_asio/overview/core/strands.html
 //  "a [...] chain of asynchronous operations associated with a connection"
 //
 // The operations implemented in this example are:
-// - read data from a socket and write it back periodically until an error occurs or the operation is stopped
-//      via a timer object passed by the caller (see: `async_repeat_echo`)
-// - run a server that accepts clients and runs `async_repeat_echo()` for each of them, until the the operation
+// - read data from a socket and write it back periodically until an error occurs (see: `async_repeat_echo`)
+// - run a server that accepts clients and runs `async_repeat_echo()` for each of them until the the operation
 //      is stopped via a timer object passed by the caller (see: `async_echo_server`)
 // - runs the server operation until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
 // - runs a server until stopped using the given allocator (see: `async_echo_server_until_ctrl_c_allocator').
@@ -32,17 +32,18 @@
 // The other runs a UNIX domain sockets server for a fixed duration of time while clients connect to it to
 // send and receive messages (see `run_unix_local_server_clients`).
 //
-//
-// The implementation of the composed asynchronous operations uses these:
-// - a `shared_async_state` (see shared_async_state.hpp) base class similar to `stable_async_op_base`
-//      https://github.com/boostorg/beast/blob/develop/include/boost/beast/core/async_op_base.hpp#L559
-//      but which offers shared ownership of the internal operation state data,
-//      similarly to `shared_handler_storage`
+// The implementation of the composed asynchronous operations uses a `shared_async_state` (see shared_async_state.hpp)
+// base class which offers:
+// - completion handler boilerplate for composed operations, similarly to `boost::beast::stable_async_op_base`
+//      https://github.com/boostorg/beast/blob/develop/include/boost/beast/core/async_op_base.hpp
+// - support for creating completion handlers from lambda functions
+//      see: `shared_async_state::wrap`
+// - shared ownership of the internal operation state data, similarly to `shared_handler_storage` from
 //      https://gist.github.com/djarek/7994948863f5c5cec4054976b68ba847#file-with_timeout-cpp-L30
-//      and a way of creating completion handlers from lambda functions.
-// - some of them use a `steady_timer` as a way to signal when they should stop.
-//      The caller sets up a timer object to never expire for each such operation and then stops it when the operation
-//      should stop.
+// - trying to invoke the final completion handler only when there is a single owner of the state holding it
+//      see: `shared_async_state::try_invoke_move_args`
+// - a debug utility for checking that completion handlers do not execute concurrently where this is not supported
+//      see: `shared_async_state::debug_check_not_concurrent
 //
 //#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
@@ -84,11 +85,10 @@
 namespace asio = boost::asio;
 using error_code = boost::system::error_code;
 
-// Continuously write on a socket what was read last, until `async_wait()` on `stop_timer` returns.
+// Continuously write on a socket what was read last until an error occurs.
 // The completion handler will receive the error that led to the operation being stopped, if any, and
 // the total number of bytes that were written on the socket.
-// Note: `stop_timer.async_wait()` completing with `asio::error::operation_aborted` is not an error, it is considered
-// the normal way to stop the execution of this operation.
+// Note: If an error occurs, the socket will be closed.
 //
 // This is a multi-chain composed operations as it may have multiple outstanding asynchronous operations simultaneously.
 // But, as this operation does not support true parallelism - multiple completion handlers executing simultaneously -
@@ -102,7 +102,7 @@ using error_code = boost::system::error_code;
 //      https://github.com/boostorg/beast/blob/develop/example/echo-op/echo_op.cpp#L72
 //
 template <typename StreamSocket, typename CompletionToken>
-auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, CompletionToken &&token) ->
+auto async_repeat_echo(StreamSocket &socket, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
     using signature = void(error_code, std::size_t);
@@ -112,16 +112,14 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
     using buffer_t = std::vector<char, buffer_allocator_type>;
 
     struct state_data {
-        state_data(StreamSocket &socket, asio::steady_timer &stop_timer, buffer_allocator_type const &allocator)
-            : socket{socket}, stop_timer{stop_timer}, reading_buffer{max_size, allocator}, read_buffer{allocator},
-              writing_buffer{allocator}, write_timer{stop_timer.get_executor().context()}, is_open{},
-              total_write_size{} {
+        state_data(StreamSocket &socket, buffer_allocator_type const &allocator)
+            : socket{socket}, reading_buffer{max_size, allocator}, read_buffer{allocator}, writing_buffer{allocator},
+              write_timer{socket.get_executor().context()}, is_open{}, total_write_size{} {
             read_buffer.reserve(max_size);
             writing_buffer.reserve(max_size);
         }
 
         StreamSocket &socket;
-        asio::steady_timer &stop_timer;
         std::size_t const max_size = 128;
         buffer_t reading_buffer;        // buffer for reading in-progress
         buffer_t read_buffer;           // buffer for data that was last read and should be written next
@@ -138,18 +136,15 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
         using shared_async_state::wrap; // MSVC workaround (`this->` fails to compile in lambdas that copy `this`)
         state_data &data;
 
-        internal_op(StreamSocket &socket, asio::steady_timer &stop_timer, buffer_allocator_type const &allocator,
+        internal_op(StreamSocket &socket, buffer_allocator_type const &allocator,
                     typename shared_async_state::handler_type &&handler)
-            : shared_async_state{socket.get_executor(), std::move(handler), socket, stop_timer, allocator},
+            : shared_async_state{socket.get_executor(), std::move(handler), socket, allocator},
               data{shared_async_state::get_data()} {
             DEBUG_CHECK_NOT_CONCURRENT();
 
-            // Waiting for the signal to stop this
-            data.stop_timer.async_wait(wrap([*this](error_code ec) mutable {
-                DEBUG_CHECK_NOT_CONCURRENT();
-                stop(ec == asio::error::operation_aborted ? error_code() : ec);
-            }));
             // Start reading and the periodic write back
+            // Note: By having both `socket.async_read_some` and `write_timer.async_wait` outstanding at the same time
+            // we ensure that if the remote side closes the connection, we detect this immediately.
             start_read();
             start_wait_write();
             data.is_open = true;
@@ -205,8 +200,8 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
                 data.op_error = ec;
                 data.is_open = false;
                 error_code ignored;
-                data.socket.cancel(ignored);
-                data.stop_timer.cancel();
+                data.socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
+                data.socket.close(ignored);
                 data.write_timer.cancel();
             }
             try_invoke();
@@ -217,13 +212,16 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
     typename internal_op::completion_type completion(token);
     auto allocator =
         handler_traits::template get_handler_allocator<typename buffer_t::value_type>(completion.completion_handler);
-    internal_op op{socket, stop_timer, allocator, std::move(completion.completion_handler)};
+    internal_op op{socket, allocator, std::move(completion.completion_handler)};
     return completion.result.get();
 }
 
-// Runs an echo server.
-// The completion handler will receive the error that led to the operation being stopped, if any, and the total
+// Runs an echo server until `async_wait()` on `stop_timer` returns.
+// The completion handler will receive the error that led to the server being stopped, if any, and the total
 // number of clients that connected to it.
+// Note: `stop_timer.async_wait()` completing with `asio::error::operation_aborted` is not an error, it is considered
+// the normal way of stopping the server execution.
+//
 // The operation uses strands internally, so there are no requirements on the way it is initiated.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, CompletionToken &&token) ->
@@ -242,7 +240,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
 
         Acceptor &acceptor;
         asio::steady_timer &stop_timer;
-        std::list<std::tuple<socket_type, asio::steady_timer, strand_type, std::size_t>> clients;
+        std::list<std::tuple<socket_type, strand_type, std::size_t>> clients;
         bool is_open;
         error_code op_error;
         std::size_t client_count;
@@ -296,48 +294,44 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
             if (ec) {
                 return; // The connection is gone already.
             }
-            asio::steady_timer stop_timer{data.acceptor.get_executor().context()};
-#ifndef __clang_analyzer__ // Silence: bugprone-use-after-move
-            stop_timer.expires_at(asio::steady_timer::time_point::max());
-#endif
+
             auto id = data.client_count++;
-            data.clients.emplace_back(std::move(socket), std::move(stop_timer), handler_executor, id);
+            data.clients.emplace_back(std::move(socket), handler_executor, id);
             auto iter = data.clients.end();
             --iter;
             std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % id % ep << std::endl;
             // Run the client operation through its own strand
-            strand_type &client_strand = std::get<2>(*iter);
+            strand_type &client_strand = std::get<1>(*iter);
             asio::dispatch(asio::bind_executor(
                 client_strand, wrap([*this, iter, &client_strand]() mutable {
-                    async_repeat_echo(
-                        std::get<0>(*iter), std::get<1>(*iter),
-                        asio::bind_executor(
-                            client_strand, wrap([*this, iter](error_code ec, std::size_t bytes) mutable {
-                                // Closing the client socket and saving any first error to log it
-                                auto &client_socket = std::get<0>(*iter);
-                                error_code ignored;
-                                client_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, !ec ? ec : ignored);
-                                client_socket.close(!ec ? ec : ignored);
-                                std::cout << boost::format("Server: Client[%1%]: Disconnected: transferred: %2% "
-                                                           "(closing error: %3%:%4%)") %
-                                                 std::get<3>(*iter) % bytes % ec % ec.message()
-                                          << std::endl;
-                                data.clients.erase(iter);
-                                // Try calling the final completion handler in case this was the last server operation
-                                try_invoke();
-                            })));
+                    async_repeat_echo(std::get<0>(*iter),
+                                      asio::bind_executor(
+                                          client_strand, wrap([*this, iter](error_code ec, std::size_t bytes) mutable {
+                                              std::cout << boost::format(
+                                                               "Server: Client[%1%]: Disconnected: transferred: %2% "
+                                                               "(closing error: %3%:%4%)") %
+                                                               std::get<2>(*iter) % bytes % ec % ec.message()
+                                                        << std::endl;
+                                              data.clients.erase(iter);
+                                              // We must try calling the final completion handler if this is the last
+                                              // server operation
+                                              try_invoke();
+                                          })));
                 })));
         }
 
         bool is_open() const { return data.is_open; }
         void stop(error_code ec) {
             if (is_open()) {
+                std::cout << boost::format("Server: Stopping (closing error: %1%:%2%)") % ec % ec.message()
+                          << std::endl;
                 data.op_error = ec;
                 data.is_open = false;
                 error_code ignored;
                 data.acceptor.cancel(ignored);
                 for (auto &c : data.clients) {
-                    std::get<1>(c).cancel();
+                    std::get<0>(c).shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
+                    std::get<0>(c).close(ignored);
                 }
             }
             try_invoke();
