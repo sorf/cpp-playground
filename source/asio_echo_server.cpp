@@ -4,7 +4,7 @@
 // - composing asynchronous operations using lambdas for the completion handlers
 //      Lambda completion functions are bound to the executor and allocator associated with the final completion
 //      handler.
-// - multi-chain (*) composed operations
+// - multi-chain [*] composed operations
 //      Their implementation has multiple outstanding asynchronous operations at the same time which means
 //      the final completion handler can be called only when the last of them completes.
 // - stopping these multi-chain composed operations
