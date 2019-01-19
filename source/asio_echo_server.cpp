@@ -19,7 +19,7 @@
 //
 // The operations implemented in this example are:
 // - read data from a socket and write it back periodically until an error occurs (see: `async_repeat_echo`)
-// - run a server that accepts clients and runs `async_repeat_echo()` for each of them until the the operation
+// - run a server that accepts clients and runs `async_repeat_echo()` for each of them until the server operation
 //      is stopped via a timer object passed by the caller (see: `async_echo_server`)
 // - runs the server operation until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
 // - runs a server until stopped using the given allocator (see: `async_echo_server_until_ctrl_c_allocator').
