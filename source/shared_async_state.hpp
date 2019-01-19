@@ -210,6 +210,7 @@ class shared_async_state {
     struct [[nodiscard]] debug_check_not_concurrent_scope_exit {
         explicit debug_check_not_concurrent_scope_exit(state_holder & state) : m_state(&state) {
             void *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(this);
+            (void)was_executing;
             BOOST_ASSERT(was_executing == nullptr);
         }
         debug_check_not_concurrent_scope_exit(debug_check_not_concurrent_scope_exit const &) = delete;
@@ -220,6 +221,7 @@ class shared_async_state {
         void reset() noexcept {
             if (m_state) {
                 void *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(nullptr);
+                (void)was_executing;
                 BOOST_ASSERT(was_executing == this);
                 m_state = nullptr;
             }
