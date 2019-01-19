@@ -313,8 +313,8 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
                                                                std::get<2>(*iter) % bytes % ec % ec.message()
                                                         << std::endl;
                                               data.clients.erase(iter);
-                                              // We must try calling the final completion handler if this is the last
-                                              // server operation
+                                              // We must call the final completion handler if we are handling here
+                                              // the last server operation
                                               try_invoke();
                                           })));
                 })));
