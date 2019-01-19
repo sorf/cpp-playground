@@ -12,7 +12,6 @@
 //      execution. This means triggering the stopping of the internal operations, ignore any errors that they may report
 //      as a result of this and ensure no new operations are initiated.
 //      When all the pending internal operations have completed, the final completion handler will be called.
-//      The `add_stop` base class helps implementing this aspect.
 //
 //  [*] the meaning of the term `chain` is taken from here:
 //  https://www.boost.org/doc/libs/1_69_0/doc/html/boost_asio/overview/core/strands.html
@@ -41,9 +40,6 @@
 //      similarly to `shared_handler_storage`
 //      https://gist.github.com/djarek/7994948863f5c5cec4054976b68ba847#file-with_timeout-cpp-L30
 //      and a way of creating completion handlers from lambda functions.
-// - an `add_stop` base class that implements common logic related to the stopping sequence,
-//      invoking the final completion handler and detecting concurrent execution of completion handlers where this is
-//      not supported.
 // - some of them use a `steady_timer` as a way to signal when they should stop.
 //      The caller sets up a timer object to never expire for each such operation and then stops it when the operation
 //      should stop.
@@ -87,45 +83,6 @@
 
 namespace asio = boost::asio;
 using error_code = boost::system::error_code;
-
-namespace async_utils {
-
-// Helper base class for the logic around triggering and handling the stopping of asynchronous operations.
-// It also adds support for verifying that there are no completion handlers executing simultaneously
-// where this is not expected.
-//
-// The derived class should provide:
-//      - bool Derived::is_open()
-//      - Derived::stop_impl(error_code)
-//      - Derived::try_invoke()
-template <class Derived> struct add_stop {
-    // Tests if an intermediary completion handler should continue its execution.
-    // It shouldn't if the intermediary operation has failed or if the composed operation has been stopped.
-    // In these cases, the final completion handler is attempted to be called; it will be called only when
-    // this is the last instance sharing the ownership of the composed operation state.
-    bool continue_handler(error_code ec) {
-        auto *pthis = static_cast<Derived *>(this);
-        if (pthis->is_open() && !ec) {
-            return true;
-        }
-        stop(ec);
-        return false;
-    }
-
-    // Initiates the stopping of the asynchronous operations initiated by the base class
-    // and attempts to call the final completion handler.
-    //
-    // Note: The actual implementation of the stopping is in Derived::stop_impl().
-    void stop(error_code ec) {
-        auto *pthis = static_cast<Derived *>(this);
-        if (pthis->is_open()) {
-            pthis->stop_impl(ec);
-        }
-        pthis->try_invoke();
-    }
-};
-
-} // namespace async_utils
 
 // Continuously write on a socket what was read last, until `async_wait()` on `stop_timer` returns.
 // The completion handler will receive the error that led to the operation being stopped, if any, and
@@ -176,11 +133,9 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
     };
 
     using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
-    struct internal_op : shared_async_state, async_utils::add_stop<internal_op> {
+    struct internal_op : shared_async_state {
         using shared_async_state::debug_check_not_concurrent;
         using shared_async_state::wrap; // MSVC workaround (`this->` fails to compile in lambdas that copy `this`)
-        using async_utils::add_stop<internal_op>::continue_handler;
-        using async_utils::add_stop<internal_op>::stop;
         state_data &data;
 
         internal_op(StreamSocket &socket, asio::steady_timer &stop_timer, buffer_allocator_type const &allocator,
@@ -204,11 +159,13 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
             data.socket.async_read_some(asio::buffer(data.reading_buffer),
                                         wrap([*this](error_code ec, std::size_t bytes) mutable {
                                             DEBUG_CHECK_NOT_CONCURRENT();
-                                            if (continue_handler(ec)) {
+                                            if (is_open() && !ec) {
                                                 data.reading_buffer.resize(bytes);
                                                 std::swap(data.reading_buffer, data.read_buffer);
                                                 data.reading_buffer.resize(data.max_size);
                                                 start_read();
+                                            } else {
+                                                stop(ec);
                                             }
                                         }));
         }
@@ -217,7 +174,7 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
             data.write_timer.expires_after(std::chrono::seconds{1});
             data.write_timer.async_wait(wrap([*this](error_code ec) mutable {
                 DEBUG_CHECK_NOT_CONCURRENT();
-                if (continue_handler(ec)) {
+                if (is_open() && !ec) {
                     if (!data.read_buffer.empty()) {
                         std::swap(data.read_buffer, data.writing_buffer);
                         data.read_buffer.resize(0);
@@ -226,26 +183,33 @@ auto async_repeat_echo(StreamSocket &socket, asio::steady_timer &stop_timer, Com
                         asio::async_write(data.socket, asio::buffer(data.writing_buffer),
                                           wrap([*this](error_code ec, std::size_t bytes) mutable {
                                               DEBUG_CHECK_NOT_CONCURRENT();
-                                              if (continue_handler(ec)) {
+                                              if (is_open() && !ec) {
                                                   data.total_write_size += bytes;
                                                   start_wait_write();
+                                              } else {
+                                                  stop(ec);
                                               }
                                           }));
                     } else {
                         start_wait_write();
                     }
+                } else {
+                    stop(ec);
                 }
             }));
         }
 
         bool is_open() const { return data.is_open; }
-        void stop_impl(error_code ec) {
-            data.op_error = ec;
-            data.is_open = false;
-            error_code ignored;
-            data.socket.cancel(ignored);
-            data.stop_timer.cancel();
-            data.write_timer.cancel();
+        void stop(error_code ec) {
+            if (is_open()) {
+                data.op_error = ec;
+                data.is_open = false;
+                error_code ignored;
+                data.socket.cancel(ignored);
+                data.stop_timer.cancel();
+                data.write_timer.cancel();
+            }
+            try_invoke();
         }
         void try_invoke() { this->try_invoke_move_args(data.op_error, data.total_write_size); }
     };
@@ -285,11 +249,9 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
     };
 
     using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
-    struct internal_op : shared_async_state, async_utils::add_stop<internal_op> {
+    struct internal_op : shared_async_state {
         using shared_async_state::debug_check_not_concurrent;
         using shared_async_state::wrap;
-        using async_utils::add_stop<internal_op>::continue_handler;
-        using async_utils::add_stop<internal_op>::stop;
         state_data &data;
         handler_executor_type handler_executor;
         strand_type server_strand;
@@ -319,9 +281,11 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
             data.acceptor.async_accept(
                 asio::bind_executor(server_strand, wrap([*this](error_code ec, socket_type socket) mutable {
                                         DEBUG_CHECK_NOT_CONCURRENT();
-                                        if (continue_handler(ec)) {
+                                        if (is_open() && !ec) {
                                             start_accept();
                                             start_client(std::move(socket));
+                                        } else {
+                                            stop(ec);
                                         }
                                     })));
         }
@@ -359,21 +323,24 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
                                                  std::get<3>(*iter) % bytes % ec % ec.message()
                                           << std::endl;
                                 data.clients.erase(iter);
-                                // Call the final completion handler if this was the last server operation
+                                // Try calling the final completion handler in case this was the last server operation
                                 try_invoke();
                             })));
                 })));
         }
 
         bool is_open() const { return data.is_open; }
-        void stop_impl(error_code ec) {
-            data.op_error = ec;
-            data.is_open = false;
-            error_code ignored;
-            data.acceptor.cancel(ignored);
-            for (auto &c : data.clients) {
-                std::get<1>(c).cancel();
+        void stop(error_code ec) {
+            if (is_open()) {
+                data.op_error = ec;
+                data.is_open = false;
+                error_code ignored;
+                data.acceptor.cancel(ignored);
+                for (auto &c : data.clients) {
+                    std::get<1>(c).cancel();
+                }
             }
+            try_invoke();
         }
         void try_invoke() { this->try_invoke_move_args(data.op_error, data.client_count); }
     };
@@ -406,11 +373,9 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         std::size_t client_count;
     };
     using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
-    struct internal_op : shared_async_state, async_utils::add_stop<internal_op> {
+    struct internal_op : shared_async_state {
         using shared_async_state::debug_check_not_concurrent;
         using shared_async_state::wrap;
-        using async_utils::add_stop<internal_op>::continue_handler;
-        using async_utils::add_stop<internal_op>::stop;
         state_data &data;
         typename shared_async_state::handler_executor_type handler_executor;
         asio::strand<typename shared_async_state::handler_executor_type> strand;
@@ -448,12 +413,15 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         }
 
         bool is_open() const { return data.is_open; }
-        void stop_impl(error_code ec) {
-            data.op_error = ec;
-            data.is_open = false;
-            data.stop_timer.cancel();
-            error_code ignored;
-            data.signals.cancel(ignored);
+        void stop(error_code ec) {
+            if (is_open()) {
+                data.op_error = ec;
+                data.is_open = false;
+                data.stop_timer.cancel();
+                error_code ignored;
+                data.signals.cancel(ignored);
+            }
+            try_invoke();
         }
         void try_invoke() { this->try_invoke_move_args(data.op_error, data.client_count); }
     };
