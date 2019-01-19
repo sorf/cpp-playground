@@ -4,7 +4,7 @@
 // - composing asynchronous operations using lambdas for the completion handlers
 //      The `shared_async_state::wrap` member function helps this.
 // - multi-chain (*) composed operations
-//      These operations have multiple outstanding asynchronous operations at the same time which means that
+//      These operations have multiple outstanding asynchronous operations at the same time which means
 //      the final completion handler can be called only when the last of them completes.
 //      The shared part of the `shared_async_state` base class helps this.
 // - stopping these composed operations
