@@ -12,11 +12,26 @@
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/assert.hpp>
-#include <boost/log/utility/unique_identifier_name.hpp>
 #include <tuple>
+
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
+#include <boost/format.hpp>
+#include <boost/log/utility/unique_identifier_name.hpp>
+#include <iostream>
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_DELAYS)
+#include <chrono>
+#include <mutex>
+#include <random>
+#include <thread>
+#endif // ASYNC_UTILS_ENABLE_DEBUG_DELAYS
+#endif // ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT
 
 namespace async_utils {
 namespace asio = boost::asio;
+
+namespace detail {
+void debug_delay();
+} // namespace detail
 
 // Container of the state associated with multiple asychronous operations.
 // It holds the final operation completion handler, an executor to be used as a default if the final completion handler
@@ -114,10 +129,16 @@ class shared_async_state {
 
         auto allocator = this->get_handler_allocator<void>();
         auto executor = this->get_handler_executor();
-        // Note: bind_executor() followed by bind_allocator() fails to compile if the result of this wrap() function
-        // is bound to a strand, e.g. if calling:
-        //      asio::bind_executor(strand, wrap(...))
-        return bind_allocator(std::move(allocator), asio::bind_executor(executor, std::forward<F>(f)));
+        return asio::bind_executor(executor, bind_allocator(std::move(allocator), std::forward<F>(f)));
+    }
+
+    // Wrap a completion handler with the given executor and the allocator associated with the final completion handler.
+    template <typename OtherExecutor, typename F> decltype(auto) wrap(OtherExecutor const &executor, F &&f) const {
+        BOOST_ASSERT(m_state);
+        BOOST_ASSERT(m_state->io_work.owns_work());
+
+        auto allocator = this->get_handler_allocator<void>();
+        return asio::bind_executor(executor, bind_allocator(std::move(allocator), std::forward<F>(f)));
     }
 
     // Tests that this is the only instance sharing the state data.
@@ -129,10 +150,6 @@ class shared_async_state {
     // from this state.
     template <typename... Args> void invoke(Args &&... args) {
         BOOST_ASSERT(unique());
-        if (debug_check_not_concurrent_scope_exit *p = m_state->debug_check_not_concurrent_scope_exit_p) {
-            p->reset();
-        }
-        BOOST_ASSERT(m_state->debug_check_not_concurrent_scope_exit_p == nullptr);
         auto handler = release();
         std::invoke(handler, std::forward<Args>(args)...);
     }
@@ -168,14 +185,21 @@ class shared_async_state {
 
     // Returns a scope guard object that ensures there are no concurrent accesses until its destruction or
     // invoke() is called.
-    decltype(auto) debug_check_not_concurrent() {
+    decltype(auto) debug_check_not_concurrent(char const *file = "", int line = 0) {
         BOOST_ASSERT(m_state);
-        return debug_check_not_concurrent_scope_exit(*m_state);
+        return debug_check_not_concurrent_scope_exit(*m_state, file, line);
     }
 
   private:
     handler_type release() noexcept {
         BOOST_ASSERT(m_state);
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
+        if (debug_check_not_concurrent_scope_exit *p = m_state->debug_check_not_concurrent_scope_exit_p) {
+            p->reset();
+        }
+        BOOST_ASSERT(m_state->debug_check_not_concurrent_scope_exit_p == nullptr);
+#endif
+
         auto state_allocator = get_handler_allocator<state_holder>();
         handler_type handler = std::move(m_state->handler);
         state_allocator_traits::destroy(state_allocator, std::addressof(*m_state));
@@ -184,12 +208,18 @@ class shared_async_state {
         return handler;
     }
 
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
     struct debug_check_not_concurrent_scope_exit;
+#endif
     struct state_holder {
         template <typename... Args>
         state_holder(Executor const &executor, handler_type &&handler, Args &&... args)
             : executor(executor), handler(std::move(handler)), io_work{asio::make_work_guard(executor)}, ref_count{1},
-              debug_check_not_concurrent_scope_exit_p{}, state_data{std::forward<Args>(args)...} {}
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
+              debug_check_not_concurrent_scope_exit_p{},
+#endif
+              state_data{std::forward<Args>(args)...} {
+        }
 
         state_holder(state_holder const &) = delete;
         state_holder(state_holder &&) = delete;
@@ -201,43 +231,92 @@ class shared_async_state {
         handler_type handler;
         asio::executor_work_guard<Executor> io_work;
         std::atomic_size_t ref_count;
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
         std::atomic<debug_check_not_concurrent_scope_exit *> debug_check_not_concurrent_scope_exit_p;
-
+#endif
         StateData state_data;
     };
-    state_holder *m_state;
 
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
     struct [[nodiscard]] debug_check_not_concurrent_scope_exit {
-        explicit debug_check_not_concurrent_scope_exit(state_holder & state) : m_state(&state) {
-            void *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(this);
-            (void)was_executing;
-            BOOST_ASSERT(was_executing == nullptr);
+        explicit debug_check_not_concurrent_scope_exit(state_holder & state, char const *file, std::size_t line)
+            : m_state(&state), m_file(file), m_line(line) {
+            auto *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(this);
+            if (was_executing != nullptr) {
+                print_concurrent_execution_error(was_executing);
+                BOOST_ASSERT(was_executing == nullptr);
+            }
+            detail::debug_delay();
         }
+
         debug_check_not_concurrent_scope_exit(debug_check_not_concurrent_scope_exit const &) = delete;
         debug_check_not_concurrent_scope_exit(debug_check_not_concurrent_scope_exit &&) = delete;
         debug_check_not_concurrent_scope_exit &operator=(debug_check_not_concurrent_scope_exit const &) = delete;
         debug_check_not_concurrent_scope_exit &operator=(debug_check_not_concurrent_scope_exit &&other) = delete;
         ~debug_check_not_concurrent_scope_exit() { reset(); }
+
         void reset() noexcept {
             if (m_state) {
-                void *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(nullptr);
-                (void)was_executing;
-                BOOST_ASSERT(was_executing == this);
+                detail::debug_delay();
+                auto *was_executing = m_state->debug_check_not_concurrent_scope_exit_p.exchange(nullptr);
+                if (was_executing != this) {
+                    print_concurrent_execution_error(was_executing);
+                    BOOST_ASSERT(was_executing == this);
+                }
                 m_state = nullptr;
             }
         }
 
       private:
+        void print_concurrent_execution_error(debug_check_not_concurrent_scope_exit * other) {
+            std::cerr << boost::format("Unexpected concurrent execution between:\n\t%1%:%2%\n\t%3%:%4%") % m_file %
+                             m_line % (other ? other->m_file : "") % (other ? other->m_line : 0)
+                      << std::endl;
+        }
         state_holder *m_state;
+        char const *m_file;
+        std::size_t m_line;
     };
+#endif // ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT
+
+    state_holder *m_state;
 };
+
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
+#define DEBUG_CHECK_NOT_CONCURRENT_IMPL()                                                                              \
+    [[maybe_unused]] auto BOOST_LOG_UNIQUE_IDENTIFIER_NAME(debug_check_not_concurrent_guard) =                         \
+        debug_check_not_concurrent(__FILE__, __LINE__)
+#else
+#define DEBUG_CHECK_NOT_CONCURRENT_IMPL() (void)0
+#endif
 
 // Calls debug_check_not_concurrent().
 // Note: This should call this->debug_check_not_concurrent() but this fails to compile in MSVC when called
 // from lambda functions that copy this as value.
-#define DEBUG_CHECK_NOT_CONCURRENT()                                                                                   \
-    [[maybe_unused]] auto BOOST_LOG_UNIQUE_IDENTIFIER_NAME(debug_check_not_concurrent_guard) =                         \
-        debug_check_not_concurrent()
+#define DEBUG_CHECK_NOT_CONCURRENT() DEBUG_CHECK_NOT_CONCURRENT_IMPL()
+
+namespace detail {
+
+void debug_delay() {
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT) && defined(ASYNC_UTILS_ENABLE_DEBUG_DELAYS)
+    struct delay_generator {
+        delay_generator() : distribution(0, 100) {}
+        unsigned next() {
+            std::lock_guard<std::mutex> lock{mutex};
+            return distribution(rd);
+        }
+
+        std::mutex mutex;
+        std::random_device rd;
+        std::uniform_int_distribution<unsigned> distribution;
+    };
+    static delay_generator s_delay_generator;
+    auto delay = s_delay_generator.next();
+    std::this_thread::sleep_for(std::chrono::milliseconds{delay});
+#endif // ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT && ASYNC_UTILS_ENABLE_DEBUG_DELAYS
+}
+
+} // namespace detail
 
 } // namespace async_utils
 

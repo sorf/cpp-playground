@@ -22,14 +22,12 @@
 // - run a server that accepts clients and runs `async_repeat_echo()` for each of them until the server operation
 //      is stopped via a timer object passed by the caller (see: `async_echo_server`)
 // - runs the server operation until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
-// - runs a server until stopped using the given allocator (see: `async_echo_server_until_ctrl_c_allocator').
-//      This is needed because we cannot bind an allocator directly to the `use_future` completion token.
+// - runs the server using an allocator and a strand (see: `async_echo_server_until_ctrl_c_allocator_strand').
+//      This is needed because we cannot bind an executor and allocator directly to the `use_future` completion token.
 //
-// There are two top level server implementations, each of them running the server composed operation in a thread pool
-// with the `use_future` completion token (see `run_server_and_join`).
-// One top level implementation runs a TCP server until the SIGINT signal (Ctrl-C) is received (see `run_tcp_server`).
-// The other runs a UNIX domain sockets server for a fixed duration of time while clients connect to it to
-// send and receive messages (see `run_unix_local_server_clients`).
+// The top level server implementation runs the server composed operation in a thread pool
+// with the `use_future` completion token (see `run_server`). It is run side by side with a number of clients
+// until a predefined run duration expires and the SIGINT signal (Ctrl-C) is raised (see `run_server_and_clients`)
 //
 // The implementation of the composed asynchronous operations uses a `shared_async_state` (see shared_async_state.hpp)
 // base class which offers:
@@ -45,6 +43,8 @@
 //      see: `shared_async_state::debug_check_not_concurrent`
 //
 //#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
+#define ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT
+#define ASYNC_UTILS_ENABLE_DEBUG_DELAYS
 //#define BOOST_ASIO_ENABLE_HANDLER_TRACKING
 
 #include "bind_allocator.hpp"
@@ -54,7 +54,6 @@
 
 #include <atomic>
 #include <boost/asio/async_result.hpp>
-#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -222,7 +221,8 @@ auto async_repeat_echo(StreamSocket &socket, CompletionToken &&token) ->
 // Note: `stop_timer.async_wait()` completing with `asio::error::operation_aborted` is not an error, it is considered
 // the normal way of stopping the server execution.
 //
-// The operation uses strands internally, so there are no requirements on the way it is initiated.
+// The caller is responsible for ensuring that this initiation call and the completion handlers of all the internal
+// operations (not running in their own strand) are running from the same implicit or explicit strand.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -230,9 +230,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
     using signature = void(error_code, std::size_t);
     using executor_type = typename Acceptor::executor_type;
     using socket_type = typename Acceptor::protocol_type::socket;
-    using handler_traits = async_utils::handler_traits<signature, CompletionToken, executor_type>;
-    using handler_executor_type = typename handler_traits::handler_executor_type;
-    using strand_type = asio::strand<handler_executor_type>;
+    using strand_type = asio::strand<executor_type>;
 
     struct state_data {
         state_data(Acceptor &acceptor, asio::steady_timer &stop_timer)
@@ -251,41 +249,33 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
         using shared_async_state::debug_check_not_concurrent;
         using shared_async_state::wrap;
         state_data &data;
-        handler_executor_type handler_executor;
-        strand_type server_strand;
 
         internal_op(Acceptor &acceptor, asio::steady_timer &stop_timer,
                     typename shared_async_state::handler_type &&handler)
             : shared_async_state{acceptor.get_executor(), std::move(handler), acceptor, stop_timer},
-              data{shared_async_state::get_data()}, handler_executor{shared_async_state::get_handler_executor()},
-              server_strand{handler_executor} {
-            // Initiate the operations to run in the server strand
-            asio::dispatch(asio::bind_executor(server_strand, wrap([*this]() mutable {
-                                                   DEBUG_CHECK_NOT_CONCURRENT();
-                                                   // Waiting for the signal to stop this
-                                                   data.stop_timer.async_wait(asio::bind_executor(
-                                                       server_strand, wrap([*this](error_code ec) mutable {
-                                                           DEBUG_CHECK_NOT_CONCURRENT();
-                                                           stop(ec == asio::error::operation_aborted ? error_code()
-                                                                                                     : ec);
-                                                       })));
-                                                   // Start accepting
-                                                   start_accept();
-                                                   data.is_open = true;
-                                               })));
+              data{shared_async_state::get_data()} {
+            DEBUG_CHECK_NOT_CONCURRENT();
+
+            // Waiting for the signal to stop this - runs in the caller's strand
+            data.stop_timer.async_wait(wrap([*this](error_code ec) mutable {
+                DEBUG_CHECK_NOT_CONCURRENT();
+                stop(ec == asio::error::operation_aborted ? error_code() : ec);
+            }));
+            // Start accepting - runs in the caller's strand
+            start_accept();
+            data.is_open = true;
         }
 
         void start_accept() {
-            data.acceptor.async_accept(
-                asio::bind_executor(server_strand, wrap([*this](error_code ec, socket_type socket) mutable {
-                                        DEBUG_CHECK_NOT_CONCURRENT();
-                                        if (is_open() && !ec) {
-                                            start_accept();
-                                            start_client(std::move(socket));
-                                        } else {
-                                            stop(ec);
-                                        }
-                                    })));
+            data.acceptor.async_accept(wrap([*this](error_code ec, socket_type socket) mutable {
+                DEBUG_CHECK_NOT_CONCURRENT();
+                if (is_open() && !ec) {
+                    start_accept();
+                    start_client(std::move(socket));
+                } else {
+                    stop(ec);
+                }
+            }));
         }
 
         void start_client(socket_type &&socket) {
@@ -296,28 +286,31 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
             }
 
             auto id = data.client_count++;
-            data.clients.emplace_back(std::move(socket), handler_executor, id);
+            data.clients.emplace_back(std::move(socket), data.acceptor.get_executor(), id);
             auto iter = data.clients.end();
             --iter;
             std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % id % ep << std::endl;
             // Run the client operation through its own strand
             strand_type &client_strand = std::get<1>(*iter);
-            asio::dispatch(asio::bind_executor(
-                client_strand, wrap([*this, iter, &client_strand]() mutable {
-                    async_repeat_echo(std::get<0>(*iter),
-                                      asio::bind_executor(
-                                          client_strand, wrap([*this, iter](error_code ec, std::size_t bytes) mutable {
-                                              std::cout << boost::format(
-                                                               "Server: Client[%1%]: Disconnected: transferred: %2% "
-                                                               "(closing error: %3%:%4%)") %
-                                                               std::get<2>(*iter) % bytes % ec % ec.message()
-                                                        << std::endl;
-                                              data.clients.erase(iter);
-                                              // We must call the final completion handler if we are handling here
-                                              // the last server operation
-                                              try_invoke();
-                                          })));
-                })));
+            asio::dispatch(wrap(client_strand, [*this, iter, &client_strand]() mutable {
+                async_repeat_echo(std::get<0>(*iter),
+                                  wrap(client_strand, [*this, iter](error_code ec, std::size_t bytes) mutable {
+                                      std::cout << boost::format("Server: Client[%1%]: Disconnected: transferred: %2% "
+                                                                 "(closing error: %3%:%4%)") %
+                                                       std::get<2>(*iter) % bytes % ec % ec.message()
+                                                << std::endl;
+                                      // As the server doesn't hold a mutex,
+                                      // we must update the client list under the server's caller strand.
+                                      // Note: `asio::post` is needed as `dispatch` may execute here and then we don't
+                                      // get to invoke the handler due to the copy of `this` still on the stack
+                                      // (if this client finishing its execution is the last operation of the server).
+                                      asio::post(wrap([*this, iter]() mutable {
+                                          DEBUG_CHECK_NOT_CONCURRENT();
+                                          data.clients.erase(iter);
+                                          try_invoke();
+                                      }));
+                                  }));
+            }));
         }
 
         bool is_open() const { return data.is_open; }
@@ -347,7 +340,9 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
 // Runs the echo server until CTRL-C.
 // The completion handler will receive the error that stopped the server, if any, and the total number of clients that
 // connected to it.
-// The operation uses strands internally, so there are no requirements on the way it is initiated.
+//
+// The caller is responsible for ensuring that this initiation call and the completion handlers of all the internal
+// operations (not running in their own strand) are running from the same implicit or explicit strand.
 template <typename Acceptor, typename CompletionToken>
 auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token) ->
     typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
@@ -371,38 +366,25 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
         using shared_async_state::debug_check_not_concurrent;
         using shared_async_state::wrap;
         state_data &data;
-        typename shared_async_state::handler_executor_type handler_executor;
-        asio::strand<typename shared_async_state::handler_executor_type> strand;
 
         internal_op(Acceptor &acceptor, typename shared_async_state::handler_type &&handler)
             : shared_async_state{acceptor.get_executor(), std::move(handler), acceptor},
-              data{shared_async_state::get_data()}, handler_executor{shared_async_state::get_handler_executor()},
-              strand{shared_async_state::get_handler_executor()} {
+              data{shared_async_state::get_data()} {
+            DEBUG_CHECK_NOT_CONCURRENT();
 
-            // We initiate and run the waiting for CTRL-C in the strand of `this`.
-            asio::dispatch(asio::bind_executor(strand, wrap([*this]() mutable {
-                                                   DEBUG_CHECK_NOT_CONCURRENT();
-                                                   data.stop_timer.expires_at(asio::steady_timer::time_point::max());
-                                                   data.signals.async_wait(asio::bind_executor(
-                                                       strand, wrap([*this](error_code ec, int /*unused*/) mutable {
-                                                           DEBUG_CHECK_NOT_CONCURRENT();
-                                                           if (!ec) {
-                                                               std::cout << "\nCTRL-C detected" << std::endl;
-                                                           }
-                                                           stop(ec);
-                                                       })));
-                                               })));
-
-            // We don't need to initiate the run-server operation in the strand of `this` as it uses strands internally.
-            // But the completion handler will have to run in the strand.
-            async_echo_server(
-                acceptor, data.stop_timer,
-                asio::bind_executor(strand, wrap([*this](error_code ec, std::size_t client_count) mutable {
-                                        DEBUG_CHECK_NOT_CONCURRENT();
-                                        data.client_count = client_count;
-                                        stop(ec);
-                                    })));
-
+            data.stop_timer.expires_at(asio::steady_timer::time_point::max());
+            data.signals.async_wait(wrap([*this](error_code ec, int /*unused*/) mutable {
+                DEBUG_CHECK_NOT_CONCURRENT();
+                if (!ec) {
+                    std::cout << "\nCTRL-C detected" << std::endl;
+                }
+                stop(ec);
+            }));
+            async_echo_server(acceptor, data.stop_timer, wrap([*this](error_code ec, std::size_t client_count) mutable {
+                                  DEBUG_CHECK_NOT_CONCURRENT();
+                                  data.client_count = client_count;
+                                  stop(ec);
+                              }));
             data.is_open = true;
         }
 
@@ -425,28 +407,41 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
     return completion.result.get();
 }
 
-// Runs the echo server until CTRL-C with an allocator.
+// Runs the echo server until CTRL-C with an allocator and a strand.
 template <typename Acceptor, typename Allocator, typename CompletionToken>
-auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator const &allocator, CompletionToken &&token)
-    -> typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
+auto async_echo_server_until_ctrl_c_allocator_strand(Acceptor &acceptor, Allocator const &allocator,
+                                                     CompletionToken &&token) ->
+    typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
 
     using signature = void(error_code, std::size_t);
     using executor_type = typename Acceptor::executor_type;
-    struct state_data {};
+    struct state_data {
+        state_data(executor_type const &executor) : strand(executor) {}
+        asio::strand<executor_type> strand;
+    };
 
     using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
     struct internal_op : shared_async_state {
-        using shared_async_state::invoke; // MSVC workaround (`this->invoke()` fails to compile in the lambda)
-        internal_op(Acceptor &acceptor, Allocator const &allocator, typename shared_async_state::handler_type &&handler)
-            : shared_async_state{acceptor.get_executor(), std::move(handler)} {
+        using shared_async_state::debug_check_not_concurrent;
+        using shared_async_state::invoke;
+        using shared_async_state::wrap;
+        state_data &data;
 
-            // We don't need any synchronization here as we start a single asynchronous operation
-            // which doesn't have any requirements on the way it is initiated.
-            async_echo_server_until_ctrl_c(
-                acceptor, async_utils::bind_allocator(
-                              allocator, this->wrap([*this](error_code ec, std::size_t client_count) mutable {
-                                  invoke(ec, client_count);
-                              })));
+        internal_op(Acceptor &acceptor, Allocator const &allocator, typename shared_async_state::handler_type &&handler)
+            : shared_async_state{acceptor.get_executor(), std::move(handler), acceptor.get_executor()},
+              data{shared_async_state::get_data()} {
+
+            // Run the server through its own strand
+            asio::dispatch(wrap(data.strand, [*this, &acceptor, allocator]() mutable {
+                DEBUG_CHECK_NOT_CONCURRENT();
+                async_echo_server_until_ctrl_c(
+                    acceptor,
+                    async_utils::bind_allocator(
+                        allocator, wrap(data.strand, [*this](error_code ec, std::size_t client_count) mutable {
+                            DEBUG_CHECK_NOT_CONCURRENT();
+                            invoke(ec, client_count);
+                        })));
+            }));
         }
     };
 
@@ -456,29 +451,21 @@ auto async_echo_server_until_ctrl_c_allocator(Acceptor &acceptor, Allocator cons
 }
 
 // Runs the server in a thread pool using a `stack_handler_allocator`.
-// At the end it joins all the threads, even if an exception occurs.
 template <typename Acceptor>
-auto run_server_and_join(Acceptor &acceptor, std::size_t server_thread_count, std::vector<std::thread> &threads) {
-
-    ON_SCOPE_EXIT([&threads] {
-        for (auto &t : threads) {
-            BOOST_ASSERT(t.joinable());
-            t.join();
-        }
-    });
+void run_server(Acceptor &acceptor, std::size_t server_thread_count, std::vector<std::thread> &threads) {
+    auto &io_context = acceptor.get_executor().context();
 
     async_utils::stack_handler_memory<64> handler_memory;
     async_utils::stack_handler_allocator<void> handler_allocator(handler_memory);
 
     // Run the server in a thread-pool and we wait for its completion with a future.
-    auto &io_context = acceptor.get_executor().context().get_executor().context();
     auto threads_io_work = asio::make_work_guard(io_context);
     for (std::size_t i = 0; i < server_thread_count; ++i) {
         threads.emplace_back([&io_context] { io_context.run(); });
     }
 
     std::future<std::size_t> f =
-        async_echo_server_until_ctrl_c_allocator(acceptor, handler_allocator, asio::use_future);
+        async_echo_server_until_ctrl_c_allocator_strand(acceptor, handler_allocator, asio::use_future);
     try {
         auto client_count = f.get();
         std::cout << boost::format("Server: Stopped: client-count: %1%") % client_count << std::endl;
@@ -489,66 +476,17 @@ auto run_server_and_join(Acceptor &acceptor, std::size_t server_thread_count, st
     threads_io_work.reset();
 }
 
-// Runs a TCP echo server.
-int run_tcp_server(std::size_t server_thread_count, int argc, char **argv) {
-    char const *arg_program = argv[0]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    if (argc != 3) {
-        std::cerr << "Usage as a TCP server: " << arg_program << " <address> <port>\n"
-                  << "Example:\n"
-                  << "    " << arg_program << " 0.0.0.0 8080" << std::endl;
-        return 1;
-    }
-    char const *arg_address = argv[1]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    char const *arg_port = argv[2];    // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+// Runs test clients connecting to the server
+template <typename Endpoint>
+void run_clients(asio::io_context &io_context, Endpoint const &server_endpoint, std::size_t client_thread_count,
+                 std::vector<std::thread> &threads) {
 
-    auto const address{asio::ip::make_address(arg_address)};
-    auto const port{static_cast<std::uint16_t>(std::strtol(arg_port, nullptr, 0))};
-    asio::ip::tcp::endpoint ep{address, port};
-    std::cout << boost::format("Server: Starting on: %1%") % ep << std::endl;
-
-    asio::io_context io_context;
-    asio::ip::tcp::acceptor acceptor{io_context};
-
-    acceptor.open(ep.protocol());
-    acceptor.set_option(asio::socket_base::reuse_address(true));
-    acceptor.bind(ep);
-    acceptor.listen();
-
-    std::vector<std::thread> threads;
-    threads.reserve(server_thread_count);
-    run_server_and_join(acceptor, server_thread_count, threads);
-    return 0;
-}
-
-// Runs a UNIX domain sockets server and clients connecting to it.
-template <typename Duration>
-int run_unix_local_server_clients(std::size_t server_thread_count, std::size_t client_thread_count,
-                                  Duration run_duration) {
-#if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
-    char const *test_file = "_TMP_local_server_test";
-    std::remove(test_file);
-    asio::local::stream_protocol::endpoint ep{test_file};
-    std::cout << boost::format("Server: Starting on: %1%") % ep << std::endl;
-
-    asio::io_context io_context;
-    asio::local::stream_protocol::acceptor acceptor{io_context, ep};
-
-    std::vector<std::thread> threads;
-    threads.reserve(1 + client_thread_count + server_thread_count);
-
-    // 1st thread will signal CTRL-C after a while
-    threads.emplace_back([&] {
-        std::this_thread::sleep_for(run_duration);
-        ::raise(SIGINT);
-    });
-
-    // The client threads can start as the server acceptor is already set up.
     for (std::size_t c = 0; c < client_thread_count; ++c) {
-        threads.emplace_back([c, ep, &io_context] {
+        threads.emplace_back([c, server_endpoint, &io_context] {
             try {
                 std::cout << boost::format("Client[%1%]: Started") % c << std::endl;
-                asio::local::stream_protocol::socket socket{io_context};
-                socket.connect(ep);
+                asio::basic_stream_socket<typename Endpoint::protocol_type> socket{io_context};
+                socket.connect(server_endpoint);
                 std::cout << boost::format("Client[%1%]: Connected") % c << std::endl;
 
                 std::size_t message_count = 0;
@@ -576,22 +514,66 @@ int run_unix_local_server_clients(std::size_t server_thread_count, std::size_t c
             }
         });
     }
+}
 
-    run_server_and_join(acceptor, server_thread_count, threads);
-    return 0;
-#else
-    (void)server_thread_count;
-    (void)client_thread_count;
-    (void)run_duration;
-    std::cerr << "Local sockets are not supported" << std::endl;
-    return 1;
-#endif
+// Runs a server and its clients.
+template <typename Endpoint, typename Duration>
+void run_server_and_clients(Endpoint const &server_endpoint, std::size_t server_thread_count,
+                            std::size_t client_thread_count, Duration run_duration) {
+
+    std::vector<std::thread> threads;
+    threads.reserve(1 + client_thread_count + server_thread_count);
+    ON_SCOPE_EXIT([&threads] {
+        for (auto &t : threads) {
+            BOOST_ASSERT(t.joinable());
+            t.join();
+        }
+    });
+
+    // 1st thread will signal CTRL-C after a while
+    threads.emplace_back([&] {
+        std::this_thread::sleep_for(run_duration);
+        ::raise(SIGINT);
+    });
+
+    asio::io_context io_context;
+    std::cout << boost::format("Server: Starting on: %1%") % server_endpoint << std::endl;
+    asio::basic_socket_acceptor<typename Endpoint::protocol_type> acceptor{io_context, server_endpoint};
+    // The client threads can start as the server acceptor is already set up.
+    run_clients(io_context, server_endpoint, client_thread_count, threads);
+    // And then the server.
+    run_server(acceptor, server_thread_count, threads);
 }
 
 int main(int argc, char **argv) {
     try {
-        using namespace std::literals::chrono_literals;
-        return argc > 1 ? run_tcp_server(25, argc, argv) : run_unix_local_server_clients(2, 4, 10s);
+        std::size_t server_thread_count = 3;
+        std::size_t client_thread_count = 20;
+        std::uint16_t duration_seconds = 60;
+        if (argc > 1) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+            duration_seconds = static_cast<std::uint16_t>(std::strtol(argv[1], nullptr, 0));
+        }
+
+#if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
+        bool local_sockets = false;
+        if (argc > 2) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+            local_sockets = (std::strcmp("l", argv[2]) == 0);
+        }
+
+        if (local_sockets) {
+            char const *test_file = "_TMP_local_server_test";
+            std::remove(test_file);
+            asio::local::stream_protocol::endpoint ep{test_file};
+            run_server_and_clients(ep, server_thread_count, client_thread_count,
+                                   std::chrono::seconds{duration_seconds});
+            return 0;
+        }
+#endif
+        asio::ip::tcp::endpoint ep{asio::ip::make_address("127.0.0.1"), 8080};
+        run_server_and_clients(ep, server_thread_count, client_thread_count, std::chrono::seconds{duration_seconds});
+        return 0;
     } catch (std::exception const &e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
     }
