@@ -416,7 +416,7 @@ auto async_echo_server_until_ctrl_c_allocator_strand(Acceptor &acceptor, Allocat
     using signature = void(error_code, std::size_t);
     using executor_type = typename Acceptor::executor_type;
     struct state_data {
-        state_data(executor_type const &executor) : strand(executor) {}
+        explicit state_data(executor_type const &executor) : strand(executor) {}
         asio::strand<executor_type> strand;
     };
 

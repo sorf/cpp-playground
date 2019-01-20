@@ -297,7 +297,7 @@ class shared_async_state {
 
 namespace detail {
 
-void debug_delay() {
+inline void debug_delay() {
 #if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT) && defined(ASYNC_UTILS_ENABLE_DEBUG_DELAYS)
     struct delay_generator {
         delay_generator() : distribution(0, 100) {}
