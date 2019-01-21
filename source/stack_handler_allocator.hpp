@@ -83,6 +83,16 @@ class stack_handler_memory : public stack_handler_memory_base {
         ::operator delete(ptr); // no-op for nullptr
     }
 
+    // Returns the number of slots in use.
+    std::size_t use_count() const {
+        lock_guard lock(m_mutex);
+        std::size_t count = 0;
+        for (auto b : m_in_use) {
+            count += b ? 1 : 0;
+        }
+        return count;
+    }
+
   private:
     // Storage
     std::array<std::aligned_storage_t<storage_size>, storage_count> m_storage;
@@ -90,7 +100,7 @@ class stack_handler_memory : public stack_handler_memory_base {
     std::array<bool, storage_count> m_in_use;
 
     using lock_guard = std::lock_guard<std::mutex>;
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
 };
 
 // A basic allocator that allocates from a fixed number of storage slots each of a fixed size.

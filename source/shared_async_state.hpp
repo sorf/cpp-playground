@@ -295,6 +295,17 @@ class shared_async_state {
 // from lambda functions that copy this as value.
 #define DEBUG_CHECK_NOT_CONCURRENT() DEBUG_CHECK_NOT_CONCURRENT_IMPL()
 
+#if defined(ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT)
+#define DEBUG_CHECK_NOT_CONCURRENT_THIS_IMPL(pthis)                                                                    \
+    [[maybe_unused]] auto BOOST_LOG_UNIQUE_IDENTIFIER_NAME(debug_check_not_concurrent_guard) =                         \
+        (pthis)->debug_check_not_concurrent(__FILE__, __LINE__)
+#else
+#define DEBUG_CHECK_NOT_CONCURRENT_THIS_IMPL(pthis) (void)0
+#endif
+
+// Calls pthis->debug_check_not_concurrent().
+#define DEBUG_CHECK_NOT_CONCURRENT_THIS(pthis) DEBUG_CHECK_NOT_CONCURRENT_THIS_IMPL(pthis)
+
 namespace detail {
 
 inline void debug_delay() {

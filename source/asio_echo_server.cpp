@@ -57,7 +57,6 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
-#include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -253,6 +252,8 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
     using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
     struct internal_op : shared_async_state {
         using shared_async_state::debug_check_not_concurrent;
+        using shared_async_state::reset;
+        using shared_async_state::unique;
         using shared_async_state::wrap;
         state_data &data;
 
@@ -306,15 +307,20 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
                                                 << std::endl;
                                       // As the server doesn't hold a mutex,
                                       // we must update the client list under the server's caller strand.
-                                      // Note: `asio::post` is needed as `dispatch` may execute here and then we don't
-                                      // get to invoke the handler due to the copy of `this` still on the stack
-                                      // (if this client finishing its execution is the last operation of the server).
-                                      // And we *must not* call try_invoke() from this client strand.
-                                      asio::post(wrap([*this, iter]() mutable {
+                                      // Notes:
+                                      // - in case this client finishing its execution is the last operation of the
+                                      //    server we need to call `try_invoke`
+                                      // - `try_invoke` *must not* be called from this client strand
+                                      // - the copy of `this` from this strand needs to be reset *before*
+                                      //   attempting to call `try_invoke()` in the server strand
+                                      auto wrapped = wrap([*this, iter]() mutable {
                                           DEBUG_CHECK_NOT_CONCURRENT();
                                           data.clients.erase(iter);
                                           try_invoke();
-                                      }));
+                                      });
+                                      BOOST_ASSERT(!unique());
+                                      reset();
+                                      asio::dispatch(std::move(wrapped));
                                   }));
             }));
         }
@@ -454,7 +460,13 @@ void run_server(Acceptor &acceptor, std::size_t server_thread_count, std::vector
     // Run the server in a thread-pool and we wait for its completion with a future.
     auto threads_io_work = asio::make_work_guard(io_context);
     for (std::size_t i = 0; i < server_thread_count; ++i) {
-        threads.emplace_back([&io_context] { io_context.run(); });
+        threads.emplace_back([&io_context] {
+            try {
+                io_context.run();
+            } catch (std::exception const &e) {
+                std::cerr << "Server thread: Run error: " << e.what() << std::endl;
+            }
+        });
     }
 
     std::future<std::size_t> f = async_echo_server_until_ctrl_c_future(acceptor, handler_allocator);
@@ -464,7 +476,10 @@ void run_server(Acceptor &acceptor, std::size_t server_thread_count, std::vector
     } catch (std::exception const &e) {
         std::cout << "Server: Run error: " << e.what() << std::endl;
     }
+    // The handler allocator shouldn't be used once the completion handler was called.
+    BOOST_ASSERT(handler_memory.use_count() == 0);
 
+    // Let the worker threads run out of work.
     threads_io_work.reset();
 }
 
@@ -513,30 +528,34 @@ template <typename Endpoint, typename Duration>
 void run_server_and_clients(Endpoint const &server_endpoint, std::size_t server_thread_count,
                             std::size_t client_thread_count, Duration run_duration) {
 
+    // The io_context must outlive the threads using it.
+    asio::io_context io_context;
+    // and we must join the threads before destructing the container that holds them.
     std::vector<std::thread> threads;
     threads.reserve(1 + client_thread_count + server_thread_count);
-    ON_SCOPE_EXIT([&threads] {
-        for (auto &t : threads) {
-            BOOST_ASSERT(t.joinable());
-            t.join();
-        }
-    });
-
-    // 1st thread will signal CTRL-C after a while (if there is any duration set).
-    if (run_duration > std::chrono::milliseconds{0}) {
-        threads.emplace_back([&] {
-            std::this_thread::sleep_for(run_duration);
-            ::raise(SIGINT);
+    {
+        ON_SCOPE_EXIT([&threads] {
+            for (auto &t : threads) {
+                BOOST_ASSERT(t.joinable());
+                t.join();
+            }
         });
-    }
 
-    asio::io_context io_context;
-    std::cout << boost::format("Server: Starting on: %1%") % server_endpoint << std::endl;
-    asio::basic_socket_acceptor<typename Endpoint::protocol_type> acceptor{io_context, server_endpoint};
-    // The client threads can start as the server acceptor is already set up.
-    run_clients(io_context, server_endpoint, client_thread_count, threads);
-    // And then the server.
-    run_server(acceptor, server_thread_count, threads);
+        // 1st thread will signal CTRL-C after a while (if there is any duration set).
+        if (run_duration > std::chrono::milliseconds{0}) {
+            threads.emplace_back([&] {
+                std::this_thread::sleep_for(run_duration);
+                ::raise(SIGINT);
+            });
+        }
+
+        std::cout << boost::format("Server: Starting on: %1%") % server_endpoint << std::endl;
+        asio::basic_socket_acceptor<typename Endpoint::protocol_type> acceptor{io_context, server_endpoint};
+        // The client threads can start as the server acceptor is already set up.
+        run_clients(io_context, server_endpoint, client_thread_count, threads);
+        // And then the server.
+        run_server(acceptor, server_thread_count, threads);
+    }
 }
 
 int main(int argc, char **argv) {
