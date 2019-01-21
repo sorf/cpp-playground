@@ -22,12 +22,11 @@
 // - run a server that accepts clients and runs `async_repeat_echo()` for each of them until the server operation
 //      is stopped via a timer object passed by the caller (see: `async_echo_server`)
 // - runs the server operation until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
-// - runs the server using an allocator and a strand (see: `async_echo_server_until_ctrl_c_allocator_strand').
-//      This is needed because we cannot bind an executor and allocator directly to the `use_future` completion token.
 //
 // The top level server implementation runs the server composed operation in a thread pool
-// with the `use_future` completion token (see `run_server`). It is run side by side with a number of clients
-// until a predefined run duration expires and the SIGINT signal (Ctrl-C) is raised (see `run_server_and_clients`)
+// with the `use_future` completion token (see `async_echo_server_until_ctrl_c_future` and `run_server`).
+// It is run side by side with a number of clients until a predefined run duration expires and the SIGINT signal
+// (Ctrl-C) is raised (see `run_server_and_clients`)
 //
 // The implementation of the composed asynchronous operations uses a `shared_async_state` (see shared_async_state.hpp)
 // base class which offers:
@@ -239,7 +238,6 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
         std::shared_ptr<socket_type> socket;
         strand_type strand;
     };
-    using client_tuple = std::tuple<socket_type, strand_type, std::size_t>;
     struct state_data {
         state_data(Acceptor &acceptor, asio::steady_timer &stop_timer)
             : acceptor{acceptor}, stop_timer{stop_timer}, is_open{}, client_count{} {}
@@ -419,46 +417,29 @@ auto async_echo_server_until_ctrl_c(Acceptor &acceptor, CompletionToken &&token)
     return completion.result.get();
 }
 
-// Runs the echo server until CTRL-C with an allocator and a strand.
-template <typename Acceptor, typename Allocator, typename CompletionToken>
-auto async_echo_server_until_ctrl_c_allocator_strand(Acceptor &acceptor, Allocator const &allocator,
-                                                     CompletionToken &&token) ->
-    typename asio::async_result<std::decay_t<CompletionToken>, void(error_code, std::size_t)>::return_type {
+// Runs the echo server until CTRL-C using the given allocator.
+// The server is run in an internal strand.
+template <typename Acceptor, typename Allocator>
+std::future<std::size_t> async_echo_server_until_ctrl_c_future(Acceptor &acceptor, Allocator const &allocator) {
 
+    auto token = asio::use_future;
     using signature = void(error_code, std::size_t);
     using executor_type = typename Acceptor::executor_type;
-    struct state_data {
-        explicit state_data(executor_type const &executor) : strand(executor) {}
-        asio::strand<executor_type> strand;
-    };
+    using h_traits = async_utils::handler_traits<signature, decltype(token), executor_type>;
 
-    using shared_async_state = async_utils::shared_async_state<signature, CompletionToken, executor_type, state_data>;
-    struct internal_op : shared_async_state {
-        using shared_async_state::debug_check_not_concurrent;
-        using shared_async_state::invoke;
-        using shared_async_state::wrap;
-        state_data &data;
-
-        internal_op(Acceptor &acceptor, Allocator const &allocator, typename shared_async_state::handler_type &&handler)
-            : shared_async_state{acceptor.get_executor(), std::move(handler), acceptor.get_executor()},
-              data{shared_async_state::get_data()} {
-
-            // Run the server through its own strand
-            asio::dispatch(wrap(data.strand, [*this, &acceptor, allocator]() mutable {
-                DEBUG_CHECK_NOT_CONCURRENT();
-                async_echo_server_until_ctrl_c(
-                    acceptor,
-                    async_utils::bind_allocator(
-                        allocator, wrap(data.strand, [*this](error_code ec, std::size_t client_count) mutable {
-                            DEBUG_CHECK_NOT_CONCURRENT();
-                            invoke(ec, client_count);
-                        })));
-            }));
-        }
-    };
-
-    typename internal_op::completion_type completion(token);
-    internal_op op{acceptor, allocator, std::move(completion.completion_handler)};
+    typename h_traits::completion_type completion(token);
+    asio::strand<executor_type> strand{acceptor.get_executor()};
+    strand.dispatch(
+        [=, &acceptor, handler = std::move(completion.completion_handler)]() {
+            async_echo_server_until_ctrl_c(
+                acceptor,
+                asio::bind_executor(strand, async_utils::bind_allocator(
+                                                allocator, [handler = std::move(handler)](
+                                                               error_code ec, std::size_t client_count) mutable {
+                                                    handler(ec, client_count);
+                                                })));
+        },
+        allocator);
     return completion.result.get();
 }
 
@@ -476,8 +457,7 @@ void run_server(Acceptor &acceptor, std::size_t server_thread_count, std::vector
         threads.emplace_back([&io_context] { io_context.run(); });
     }
 
-    std::future<std::size_t> f =
-        async_echo_server_until_ctrl_c_allocator_strand(acceptor, handler_allocator, asio::use_future);
+    std::future<std::size_t> f = async_echo_server_until_ctrl_c_future(acceptor, handler_allocator);
     try {
         auto client_count = f.get();
         std::cout << boost::format("Server: Stopped: client-count: %1%") % client_count << std::endl;
