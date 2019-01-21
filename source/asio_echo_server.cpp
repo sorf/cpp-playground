@@ -73,7 +73,6 @@
 #include <list>
 #include <memory>
 #include <thread>
-#include <tuple>
 #include <vector>
 
 #if defined(BOOST_ASIO_HAS_LOCAL_SOCKETS)
@@ -232,13 +231,22 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
     using socket_type = typename Acceptor::protocol_type::socket;
     using strand_type = asio::strand<executor_type>;
 
+    struct client_session {
+        client_session(std::size_t id, socket_type &&socket, executor_type const &executor)
+            : id(id), socket(std::make_shared<socket_type>(std::move(socket))), strand(executor) {}
+
+        std::size_t id;
+        std::shared_ptr<socket_type> socket;
+        strand_type strand;
+    };
+    using client_tuple = std::tuple<socket_type, strand_type, std::size_t>;
     struct state_data {
         state_data(Acceptor &acceptor, asio::steady_timer &stop_timer)
             : acceptor{acceptor}, stop_timer{stop_timer}, is_open{}, client_count{} {}
 
         Acceptor &acceptor;
         asio::steady_timer &stop_timer;
-        std::list<std::tuple<socket_type, strand_type, std::size_t>> clients;
+        std::list<client_session> clients;
         bool is_open;
         error_code op_error;
         std::size_t client_count;
@@ -286,24 +294,24 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
             }
 
             auto id = data.client_count++;
-            data.clients.emplace_back(std::move(socket), data.acceptor.get_executor(), id);
+            data.clients.emplace_back(id, std::move(socket), data.acceptor.get_executor());
             auto iter = data.clients.end();
             --iter;
             std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % id % ep << std::endl;
             // Run the client operation through its own strand
-            strand_type &client_strand = std::get<1>(*iter);
-            asio::dispatch(wrap(client_strand, [*this, iter, &client_strand]() mutable {
-                async_repeat_echo(std::get<0>(*iter),
-                                  wrap(client_strand, [*this, iter](error_code ec, std::size_t bytes) mutable {
+            asio::dispatch(wrap(iter->strand, [*this, iter]() mutable {
+                async_repeat_echo(*iter->socket,
+                                  wrap(iter->strand, [*this, iter](error_code ec, std::size_t bytes) mutable {
                                       std::cout << boost::format("Server: Client[%1%]: Disconnected: transferred: %2% "
                                                                  "(closing error: %3%:%4%)") %
-                                                       std::get<2>(*iter) % bytes % ec % ec.message()
+                                                       iter->id % bytes % ec % ec.message()
                                                 << std::endl;
                                       // As the server doesn't hold a mutex,
                                       // we must update the client list under the server's caller strand.
                                       // Note: `asio::post` is needed as `dispatch` may execute here and then we don't
                                       // get to invoke the handler due to the copy of `this` still on the stack
                                       // (if this client finishing its execution is the last operation of the server).
+                                      // And we *must not* call try_invoke() from this client strand.
                                       asio::post(wrap([*this, iter]() mutable {
                                           DEBUG_CHECK_NOT_CONCURRENT();
                                           data.clients.erase(iter);
@@ -323,8 +331,12 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
                 error_code ignored;
                 data.acceptor.cancel(ignored);
                 for (auto &c : data.clients) {
-                    std::get<0>(c).shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
-                    std::get<0>(c).close(ignored);
+                    // The closing of the client socket has to be done in its strand.
+                    asio::dispatch(wrap(c.strand, [*this, socket = c.socket]() {
+                        error_code ignored;
+                        socket->shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
+                        socket->close(ignored);
+                    }));
                 }
             }
             try_invoke();
@@ -530,11 +542,13 @@ void run_server_and_clients(Endpoint const &server_endpoint, std::size_t server_
         }
     });
 
-    // 1st thread will signal CTRL-C after a while
-    threads.emplace_back([&] {
-        std::this_thread::sleep_for(run_duration);
-        ::raise(SIGINT);
-    });
+    // 1st thread will signal CTRL-C after a while (if there is any duration set).
+    if (run_duration > std::chrono::milliseconds{0}) {
+        threads.emplace_back([&] {
+            std::this_thread::sleep_for(run_duration);
+            ::raise(SIGINT);
+        });
+    }
 
     asio::io_context io_context;
     std::cout << boost::format("Server: Starting on: %1%") % server_endpoint << std::endl;
