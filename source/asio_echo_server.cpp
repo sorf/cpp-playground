@@ -336,7 +336,7 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
                 data.acceptor.cancel(ignored);
                 for (auto &client : data.clients) {
                     // The closing of the client socket has to be done in its strand.
-                    // (and te socket has to live long enough - e.g. even if the client is currently shutting down)
+                    // (and the socket has to live long enough - e.g. even if the client is currently shutting down)
                     asio::dispatch(wrap(client.strand, [*this, socket = client.socket]() {
                         error_code ignored;
                         socket->shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
