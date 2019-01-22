@@ -294,16 +294,16 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
 
             auto id = data.client_count++;
             data.clients.emplace_back(id, std::move(socket), data.acceptor.get_executor());
-            auto iter = data.clients.end();
-            --iter;
+            auto client_it = data.clients.end();
+            --client_it;
             std::cout << boost::format("Server: Client[%1%]: Connected: remote-endpint: %2%") % id % ep << std::endl;
             // Run the client operation through its own strand
-            asio::dispatch(wrap(iter->strand, [*this, iter]() mutable {
-                async_repeat_echo(*iter->socket,
-                                  wrap(iter->strand, [*this, iter](error_code ec, std::size_t bytes) mutable {
+            asio::dispatch(wrap(client_it->strand, [*this, client_it]() mutable {
+                async_repeat_echo(*client_it->socket,
+                                  wrap(client_it->strand, [*this, client_it](error_code ec, std::size_t bytes) mutable {
                                       std::cout << boost::format("Server: Client[%1%]: Disconnected: transferred: %2% "
                                                                  "(closing error: %3%:%4%)") %
-                                                       iter->id % bytes % ec % ec.message()
+                                                       client_it->id % bytes % ec % ec.message()
                                                 << std::endl;
                                       // As the server doesn't hold a mutex,
                                       // we must update the client list under the server's caller strand.
@@ -313,9 +313,9 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
                                       // - `try_invoke` *must not* be called from this client strand
                                       // - the copy of `this` from this strand needs to be reset *before*
                                       //   attempting to call `try_invoke()` in the server strand
-                                      auto wrapped = wrap([*this, iter]() mutable {
+                                      auto wrapped = wrap([*this, client_it]() mutable {
                                           DEBUG_CHECK_NOT_CONCURRENT();
-                                          data.clients.erase(iter);
+                                          data.clients.erase(client_it);
                                           try_invoke();
                                       });
                                       BOOST_ASSERT(!unique());
@@ -334,9 +334,10 @@ auto async_echo_server(Acceptor &acceptor, asio::steady_timer &stop_timer, Compl
                 data.is_open = false;
                 error_code ignored;
                 data.acceptor.cancel(ignored);
-                for (auto &c : data.clients) {
+                for (auto &client : data.clients) {
                     // The closing of the client socket has to be done in its strand.
-                    asio::dispatch(wrap(c.strand, [*this, socket = c.socket]() {
+                    // (and te socket has to live long enough - e.g. even if the client is currently shutting down)
+                    asio::dispatch(wrap(client.strand, [*this, socket = client.socket]() {
                         error_code ignored;
                         socket->shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
                         socket->close(ignored);
