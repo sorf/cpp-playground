@@ -81,7 +81,7 @@ struct async_operation {
     template <typename Handler> static void execute(unsigned behavior, Handler &&h) {
         auto f = leaf::capture_result<std::exception, e_failure_info>(
             [behavior]()->leaf::result<unsigned> {
-                return leaf::exception_to_result<std::exception>(
+                return leaf::exception_to_result(
                     [behavior]()->leaf::result<unsigned> {
                         return f2(behavior);
                     });
@@ -109,7 +109,7 @@ int main() {
                 [](custom_error_code ec) {
                     std::cout << "Error: code: " << ec << std::endl;
                 },
-#if 0
+#if 1
                 [](std::exception_ptr const* ep)
                 {
                     if (ep) {
