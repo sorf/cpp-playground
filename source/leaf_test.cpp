@@ -19,7 +19,6 @@ enum custom_error_code { first_error = 1, second_error };
 namespace boost {
 namespace leaf {
 template <> struct is_error_type<custom_error_code> : std::true_type {};
-template <> struct is_error_type<std::error_code> : std::true_type {};
 } // namespace leaf
 } // namespace boost
 
@@ -56,7 +55,7 @@ leaf::result<unsigned> f2(unsigned behavior) {
     case 3:
         throw std::runtime_error("f2-2");
     case 4:
-        return leaf::new_error(std::make_error_code(std::errc::address_in_use));
+        return leaf::error_id(std::make_error_code(std::errc::address_in_use));
     default:
         f1(behavior - 5);
         break;
@@ -80,9 +79,16 @@ struct async_operation {
 
   private:
     template <typename Handler> static void execute(unsigned behavior, Handler &&h) {
-        auto result = leaf::capture_result<std::exception, e_failure_info>(
-            [behavior]() -> leaf::result<int> { return f2(behavior); });
-        h(result());
+        auto f = leaf::capture_result<std::exception, e_failure_info>(
+            [behavior]()->leaf::result<unsigned> {
+                return leaf::exception_to_result<std::exception>(
+                    [behavior]()->leaf::result<unsigned> {
+                        return f2(behavior);
+                    });
+            });
+
+        leaf::result<unsigned> r = f();
+        h(r);
     }
 };
 
@@ -91,35 +97,44 @@ int main() {
         asio::io_context io_context;
         std::cout << "\nf2(" << i << ")" << std::endl;
         async_operation::start(io_context, i, [](leaf::result<int> result) {
-            leaf::try_(
+            leaf::handle_all(
                 [&result]() -> leaf::result<void> {
                     LEAF_CHECK(result);
                     std::cout << "Success" << std::endl;
                     return {};
                 },
-                [](leaf::catch_<std::runtime_error> e, e_failure_info const &info) -> leaf::result<void> {
-                    std::cout << "Error: runtime_error: " << e.value.what() << ", info: " << info.value << std::endl;
-                    return {};
-                },
-                [](leaf::catch_<std::runtime_error> e) -> leaf::result<void> {
-                    std::cout << "Error: runtime_error: " << e.value.what() << std::endl;
-                    return {};
-                },
-                [](custom_error_code ec, e_failure_info const &info) -> leaf::result<void> {
+                [](custom_error_code ec, e_failure_info const &info) {
                     std::cout << "Error: code: " << ec << ", info: " << info.value << std::endl;
-                    return {};
                 },
-                [](custom_error_code ec) -> leaf::result<void> {
+                [](custom_error_code ec) {
                     std::cout << "Error: code: " << ec << std::endl;
-                    return {};
                 },
-                [](leaf::error_info const &e /*, leaf::verbose_diagnostic_info const *v*/) -> leaf::result<void> {
+#if 0
+                [](std::exception_ptr const* ep)
+                {
+                    if (ep) {
+                        leaf::try_([&]{
+                            std::rethrow_exception(*ep);
+                        },
+                        [](leaf::catch_<std::runtime_error> e, e_failure_info const &info) {
+                            std::cout << "Error: runtime_error: " << e.value().what() << ", info: " 
+                                      << info.value << std::endl;
+                        },
+                        [](leaf::catch_<std::runtime_error> e){
+                            std::cout << "Error: runtime_error: " << e.value().what() << std::endl;
+                        },
+                        [](leaf::error_info const &e) {
+                            std::cout << "Error: unmatched exception, what: "
+                                      << (e.has_exception() ? e.exception()->what() : "<NA>") << std::endl;
+                        });
+                    } else {
+                        std::cout << "Error: NULL exception" << std::endl;
+                    }
+                },
+#endif
+                [](leaf::error_info const &e) {
                     std::cout << "Error: unmatched error, what: "
                               << (e.has_exception() ? e.exception()->what() : "<NA>") << std::endl;
-                    /*if (v) {
-                        std::cout << "Error: verbose-info: " << *v << std::endl;
-                    }*/
-                    return {};
                 });
         });
         io_context.run();
