@@ -11,7 +11,7 @@
 namespace asio = boost::asio;
 namespace leaf = boost::leaf;
 
-struct e_failure_info {
+struct e_failure_info_stack {
     std::string value;
 };
 
@@ -23,7 +23,8 @@ template <> struct is_error_type<custom_error_code> : std::true_type {};
 } // namespace boost
 
 void f1(unsigned behavior) {
-    [[maybe_unused]] auto propagate = leaf::preload(e_failure_info{"f1"});
+    [[maybe_unused]] auto p = leaf::accumulate([](e_failure_info_stack &info) { info.value += "|f1"; });
+
     switch (behavior) {
     case 0:
         return;
@@ -44,7 +45,8 @@ leaf::result<unsigned> f2(unsigned behavior) {
         throw std::runtime_error("f2-1");
     }
 
-    [[maybe_unused]] auto propagate = leaf::preload(e_failure_info{"f2"});
+    [[maybe_unused]] auto p = leaf::accumulate([](e_failure_info_stack &info) { info.value += "|f2"; });
+
     switch (behavior) {
     case 0:
         break;
@@ -55,7 +57,7 @@ leaf::result<unsigned> f2(unsigned behavior) {
     case 3:
         throw std::runtime_error("f2-2");
     case 4:
-        return leaf::error_id(std::make_error_code(std::errc::address_in_use));
+        return leaf::new_error(std::errc::address_in_use);
     default:
         f1(behavior - 5);
         break;
@@ -79,12 +81,15 @@ struct async_operation {
 
   private:
     template <typename Handler> static void execute(unsigned behavior, Handler &&h) {
-        auto f = leaf::capture_result<std::exception, e_failure_info>(
-            [behavior]()->leaf::result<unsigned> {
-                return leaf::exception_to_result(
-                    [behavior]()->leaf::result<unsigned> {
-                        return f2(behavior);
-                    });
+        // exception_to_result now always sends the original exception in a std::exception_ptr, so we need to add that
+        // to the type list passed to capture_in_result.
+        auto f = leaf::capture_in_result<std::exception, e_failure_info_stack, custom_error_code, std::exception_ptr>(
+            [behavior]() -> leaf::result<unsigned> {
+                return leaf::exception_to_result([behavior]() -> leaf::result<unsigned> {
+                    [[maybe_unused]] auto p =
+                        leaf::accumulate([](e_failure_info_stack &info) { info.value += "|execute"; });
+                    return f2(behavior);
+                });
             });
 
         leaf::result<unsigned> r = f();
@@ -93,6 +98,8 @@ struct async_operation {
 };
 
 int main() {
+    std::cout << "std::errc::address_in_use is: " << (int)std::errc::address_in_use << std::endl;
+
     for (unsigned i = 0; i < 10; ++i) {
         asio::io_context io_context;
         std::cout << "\nf2(" << i << ")" << std::endl;
@@ -103,38 +110,41 @@ int main() {
                     std::cout << "Success" << std::endl;
                     return {};
                 },
-                [](custom_error_code ec, e_failure_info const &info) {
-                    std::cout << "Error: code: " << ec << ", info: " << info.value << std::endl;
+                [](custom_error_code ec, e_failure_info_stack const *info_stack) {
+                    std::cout << "Error: custom_error code: " << ec
+                              << ", info_stack: " << (info_stack ? info_stack->value : "NA") << std::endl;
                 },
-                [](custom_error_code ec) {
-                    std::cout << "Error: code: " << ec << std::endl;
+                // Note:
+                // This handler will be called if there is an std::exception_ptr available, which there will be in
+                // case exception_to_result caught an exception. Note that any exception types from the list to
+                // instantiate the exception_to_result template, if caught, will be sliced and sent as error
+                // objects, so they could be intercepted in the above handlers as well (provided that they were
+                // included in the type list passed to capture_in_result).
+                [](std::exception_ptr const &ep, e_failure_info_stack const *info_stack) {
+                    leaf::try_([&] { std::rethrow_exception(ep); },
+                               [&](leaf::catch_<std::runtime_error> e) {
+                                   std::cout << "Error: runtime_error: " << e.value().what()
+                                             << ", info_stack: " << (info_stack ? info_stack->value : "NA")
+                                             << std::endl;
+                               },
+                               [&](leaf::error_info const &e, leaf::verbose_diagnostic_info const &diag) {
+                                   std::cout << "Error: unmatched exception, what: "
+                                             << (e.has_exception() ? e.exception()->what() : "<NA>")
+                                             << ", info_stack: " << (info_stack ? info_stack->value : "NA")
+                                             << ", diagnostic:" << diag << std::endl;
+                               });
                 },
-#if 1
-                [](std::exception_ptr const* ep)
-                {
-                    if (ep) {
-                        leaf::try_([&]{
-                            std::rethrow_exception(*ep);
-                        },
-                        [](leaf::catch_<std::runtime_error> e, e_failure_info const &info) {
-                            std::cout << "Error: runtime_error: " << e.value().what() << ", info: " 
-                                      << info.value << std::endl;
-                        },
-                        [](leaf::catch_<std::runtime_error> e){
-                            std::cout << "Error: runtime_error: " << e.value().what() << std::endl;
-                        },
-                        [](leaf::error_info const &e) {
-                            std::cout << "Error: unmatched exception, what: "
-                                      << (e.has_exception() ? e.exception()->what() : "<NA>") << std::endl;
-                        });
-                    } else {
-                        std::cout << "Error: NULL exception" << std::endl;
-                    }
-                },
+#if 0                
+                // Note: This needs to be the last (or second to last) as it would match any error -
+                //       leaf::error_id is a std::error_code.
+                //       On the other side, leaf::verbose_diagnostic_info below prints the original
+                //       error_code due to it being a first-class error type in LEAF.
+                [](std::error_code const &ec) { std::cout << "Error: error_code: " << ec << std::endl; },
 #endif
-                [](leaf::error_info const &e) {
-                    std::cout << "Error: unmatched error, what: "
-                              << (e.has_exception() ? e.exception()->what() : "<NA>") << std::endl;
+                [](leaf::verbose_diagnostic_info const &diag, e_failure_info_stack const *info_stack) {
+                    std::cout << "Error: unmatched error"
+                              << ", info_stack: " << (info_stack ? info_stack->value : "NA") << ", diagnostic:" << diag
+                              << std::endl;
                 });
         });
         io_context.run();
