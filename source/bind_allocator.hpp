@@ -14,7 +14,7 @@ template <typename T, typename Allocator> struct allocator_binder {
     using allocator_type = Allocator;
 
     target_type &get() noexcept { return this->target; }
-    const target_type &get() const { return this->target; }
+    const target_type &get() const noexcept { return this->target; }
     allocator_type get_allocator() const noexcept { return this->allocator; }
 
     template <class... Args> decltype(auto) operator()(Args &&... args) const {
@@ -44,8 +44,8 @@ namespace asio {
 template <typename T, typename Allocator, typename Allocator1>
 struct associated_allocator<async_utils::allocator_binder<T, Allocator>, Allocator1> {
     using type = Allocator;
-    static type get(const async_utils::allocator_binder<T, Allocator> &b,
-                    const Allocator1 & /*unused*/ = Allocator1()) noexcept {
+    static type get(async_utils::allocator_binder<T, Allocator> const &b,
+                    Allocator1 const & /*unused*/ = Allocator1()) noexcept {
         return b.get_allocator();
     }
 };
@@ -53,7 +53,7 @@ struct associated_allocator<async_utils::allocator_binder<T, Allocator>, Allocat
 template <typename T, typename Allocator, typename Executor1>
 struct associated_executor<async_utils::allocator_binder<T, Allocator>, Executor1> {
     using type = typename associated_executor<T, Executor1>::type;
-    static type get(const async_utils::allocator_binder<T, Allocator> &b, const Executor1 &e = Executor1()) noexcept {
+    static type get(async_utils::allocator_binder<T, Allocator> const &b, Executor1 const &e = Executor1()) noexcept {
         return associated_executor<T, Executor1>::get(b.get(), e);
     }
 };
