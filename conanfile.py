@@ -7,11 +7,11 @@ class CppPlaygroundConan(ConanFile):
     url = "https://github.com/sorf/cpp-playground"
     description = "C++ playground project"
     settings = "os", "arch", "compiler", "build_type"
-    options = {"clang_tidy": [True, False]}
+    options = {}
     generators = "cmake"
     exports_sources = "source/*", ".clang-format", ".clang-tidy", "CMakeLists.txt", "format_check.sh"
     requires = "boost/1.69.0@conan/stable"
-    default_options = "clang_tidy=False", "boost:header_only=True"
+    default_options = "boost:header_only=True"
 
     def build(self):
         cmake = CMake(self)
@@ -32,14 +32,12 @@ class CppPlaygroundConan(ConanFile):
         if not self.settings.os == "Windows":
             cmake.definitions["CONAN_CXX_FLAGS"] += " -pthread"
 
-        if self.options.clang_tidy:
-            # If testing with clang_tidy, removing the CONAN_LIBCXX flag so that we do not get a
-            # clang-tidy warning/error from _GLIBCXX_USE_CXX11_ABI being defined
-            del cmake.definitions["CONAN_LIBCXX"]
-
-            path_clang_tidy = tools.which(tools.get_env("CLANG_TIDY", "clang-tidy"))
-            if path_clang_tidy:
-                cmake.definitions["CLANG_TIDY_COMMAND"] = path_clang_tidy
+        if self.settings.compiler == "clang":
+            clang_tidy = tools.get_env("CLANG_TIDY")
+            if clang_tidy:
+                path_clang_tidy = tools.which(clang_tidy)
+                if path_clang_tidy:
+                    cmake.definitions["CLANG_TIDY_COMMAND"] = path_clang_tidy
 
         cmake.configure()
         cmake.build()

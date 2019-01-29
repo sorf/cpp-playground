@@ -96,8 +96,9 @@ CheckOptions:
     value: lower_case
   - key: readability-identifier-naming.VirtualMethodCase
     value: lower_case
-  - key: readability-identifier-naming.MacroDefinitionCase
-    value: UPPER_CASE
+# Note: This is disabled as it raises an error for _GLIBCXX_USE_CXX11_ABI from command line.
+#  - key: readability-identifier-naming.MacroDefinitionCase
+#    value: UPPER_CASE
   - key: readability-identifier-naming.TypeAliasCase
     value: lower_case
   - key: readability-identifier-naming.IgnoreFailedSplit
