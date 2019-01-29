@@ -18,11 +18,11 @@ template <typename T, typename Allocator> struct allocator_binder {
     allocator_type get_allocator() const noexcept { return this->allocator; }
 
     template <class... Args> decltype(auto) operator()(Args &&... args) const {
-        std::invoke(target, std::forward<Args>(args)...);
+        return std::invoke(target, std::forward<Args>(args)...);
     }
 
     template <class... Args> decltype(auto) operator()(Args &&... args) {
-        std::invoke(target, std::forward<Args>(args)...);
+        return std::invoke(target, std::forward<Args>(args)...);
     }
 
     target_type target;

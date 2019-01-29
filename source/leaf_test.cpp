@@ -1,4 +1,5 @@
-#include "bind_error_handler.hpp"
+#include "bind_ehandlers_type.hpp"
+#include "leaf_call.hpp"
 
 #include <algorithm>
 #include <boost/asio/associated_executor.hpp>
@@ -20,7 +21,7 @@ struct e_failure_info_stack {
 enum custom_error_code { first_error = 1, second_error };
 namespace boost {
 namespace leaf {
-template <> struct is_error_type<custom_error_code> : std::true_type {};
+template <> struct is_e_type<custom_error_code> : std::true_type {};
 } // namespace leaf
 } // namespace boost
 
@@ -75,32 +76,22 @@ struct async_operation {
 
   public:
     template <typename Handler> static void start(asio::io_context &io_context, unsigned behavior, Handler &&h) {
-        asio::post(io_context, async_utils::bind_error_handler<async_utils::associated_error_handler_t<Handler>>(
-                                   asio::bind_executor(get_executor(io_context, h),
-                                                       [behavior, h = std::forward<Handler>(h)]() mutable {
-                                                           execute(behavior, std::move(h));
-                                                       })));
+        asio::post(io_context, async_utils::bind_ehandlers_type_from<Handler>(asio::bind_executor(
+                                   get_executor(io_context, h), [behavior, h = std::forward<Handler>(h)]() mutable {
+                                       execute(behavior, std::move(h));
+                                   })));
     }
 
   private:
     template <typename Handler> static void execute(unsigned behavior, Handler &&h) {
-        using error_handler = async_utils::associated_error_handler_t<Handler>;
-        error_handler *dummy = nullptr;
-        auto f = leaf::capture_in_result(
-            [behavior]() -> leaf::result<unsigned> {
-                return leaf::exception_to_result([behavior]() -> leaf::result<unsigned> {
-                    [[maybe_unused]] auto p =
-                        leaf::accumulate([](e_failure_info_stack &info) { info.value += "|execute"; });
-                    return f2(behavior);
-                });
-            },
-            dummy);
-        leaf::result<unsigned> r = f();
-        h(r);
+        h(async_utils::leaf_call<unsigned>(async_utils::bind_ehandlers_type_from<Handler>([behavior] {
+            [[maybe_unused]] auto p = leaf::accumulate([](e_failure_info_stack &info) { info.value += "|execute"; });
+            return f2(behavior);
+        })));
     }
 };
 
-auto make_error_handlers() {
+auto make_ehandlers() {
     return std::make_tuple(
         [](custom_error_code ec, e_failure_info_stack const *info_stack) {
             std::cout << "Error: custom_error code: " << ec
@@ -143,17 +134,17 @@ int main() {
     for (unsigned i = 0; i < 10; ++i) {
         asio::io_context io_context;
         std::cout << "\nf2(" << i << ")" << std::endl;
-        auto error_handlers = make_error_handlers();
+        auto ehandlers = make_ehandlers();
 
         async_operation::start(io_context, i,
-                               async_utils::bind_error_handler<decltype(error_handlers)>([&](leaf::result<int> result) {
+                               async_utils::bind_ehandlers_type<decltype(ehandlers)>([&](leaf::result<int> result) {
                                    leaf::handle_all(
                                        [&result]() -> leaf::result<void> {
                                            LEAF_CHECK(result);
                                            std::cout << "Success" << std::endl;
                                            return {};
                                        },
-                                       error_handlers);
+                                       ehandlers);
                                }));
         io_context.run();
     }
