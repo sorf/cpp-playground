@@ -1,31 +1,11 @@
 #ifndef BIND_EHANDLERS_TYPE_HPP
 #define BIND_EHANDLERS_TYPE_HPP
 
+#include "associated_ehandlers_type.hpp"
 #include <boost/asio/associated_allocator.hpp>
 #include <boost/asio/associated_executor.hpp>
 
 namespace async_utils {
-
-namespace detail {
-
-template <typename> struct associated_ehandlers_type_check { typedef void type; };
-
-template <typename T, typename E, typename = void> struct associated_ehandlers_type_impl { typedef E type; };
-template <typename T, typename E>
-struct associated_ehandlers_type_impl<T, E, typename associated_ehandlers_type_check<typename T::type_type>::type> {
-    typedef typename T::ehandlers_type type;
-};
-
-} // namespace detail
-
-// Traits type used to obtain the E-handlers type associated with an object.
-template <typename T> struct associated_ehandlers_type {
-    // If T has a nested type ehandlers_type, T::ehandlers_type.
-    /// Otherwise std::tuple<>.
-    using type = typename detail::associated_ehandlers_type_impl<T, std::tuple<>>::type;
-};
-
-template <typename T> using associated_ehandlers_type_t = typename associated_ehandlers_type<T>::type;
 
 // Associates an object of type T with an E-handlers type.
 template <typename T, typename EHandlers> struct ehandlers_type_binder {

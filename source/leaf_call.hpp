@@ -1,7 +1,7 @@
 #ifndef LEAF_CALL_HPP
 #define LEAF_CALL_HPP
 
-#include "bind_ehandlers_type.hpp"
+#include "associated_ehandlers_type.hpp"
 #include <boost/leaf/capture_in_result.hpp>
 #include <boost/leaf/exception_to_result.hpp>
 
