@@ -1,45 +1,5 @@
 // Composing asynchronous operations up to an echo server that gracefully shuts down on CTRL-C.
-//
-// These are the main aspects addressed by this example:
-// - composing asynchronous operations using lambdas for the completion handlers
-//      Lambda completion functions are bound to the executor and allocator associated with the final completion
-//      handler.
-// - multi-chain [*] composed operations
-//      Their implementation has multiple outstanding asynchronous operations at the same time which means
-//      the final completion handler can be called only when the last of them completes.
-// - stopping these multi-chain composed operations
-//      As a result of an error or a graceful-stop signal, each such operation stops its internal operations,
-//      ignores any subsequent errors that they might report and ensures no new operations are initiated.
-//      When all the pending internal operations have completed, the final completion handler will be called.
-//      This example shows how a timer object or waiting for a signal can be used as graceful-stop signals.
-//
-//  [*] the term `chain` is borrowed from here:
-//  https://www.boost.org/doc/libs/1_69_0/doc/html/boost_asio/overview/core/strands.html
-//  "a [...] chain of asynchronous operations associated with a connection"
-//
-// The operations implemented in this example are:
-// - read data from a socket and write it back periodically until an error occurs (see: `async_repeat_echo`)
-// - run a server that accepts clients and runs `async_repeat_echo()` for each of them until the server operation
-//      is stopped via a timer object passed by the caller (see: `async_echo_server`)
-// - runs the server operation until the SIGINT signal (CTRL-C) is received (see `async_echo_server_until_ctrl_c`)
-//
-// The top level server implementation runs the server composed operation in a thread pool
-// with the `use_future` completion token (see `async_echo_server_until_ctrl_c_future` and `run_server`).
-// It is run side by side with a number of clients until a predefined run duration expires and the SIGINT signal
-// (Ctrl-C) is raised (see `run_server_and_clients`)
-//
-// The implementation of the composed asynchronous operations uses a `shared_async_state` (see shared_async_state.hpp)
-// base class which offers:
-// - completion handler boilerplate for composed operations, similarly to `boost::beast::stable_async_op_base`
-//      https://github.com/boostorg/beast/blob/develop/include/boost/beast/core/async_op_base.hpp
-// - support for creating completion handlers from lambda functions
-//      see: `shared_async_state::wrap`
-// - shared ownership of the internal operation state data, similarly to `shared_handler_storage` from
-//      https://gist.github.com/djarek/7994948863f5c5cec4054976b68ba847#file-with_timeout-cpp-L30
-// - trying to invoke the final completion handler only when there is a single owner of the state holding it
-//      see: `shared_async_state::try_invoke_move_args`
-// - a debug utility for checking that completion handlers do not execute concurrently where this is not supported
-//      see: `shared_async_state::debug_check_not_concurrent`
+// See details in `asio_echo_server_leaf.cpp`
 //
 //#define ASYNC_UTILS_STACK_HANDLER_ALLOCATOR_DEBUG
 #define ASYNC_UTILS_ENABLE_DEBUG_CHECK_NOT_CONCURRENT
