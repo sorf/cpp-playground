@@ -95,7 +95,7 @@ auto make_ehandlers() {
     return std::make_tuple(
         [](custom_error_code ec, e_failure_info_stack const *info_stack) {
             std::cout << "Error: custom_error code: " << ec
-                      << ", info_stack: " << (info_stack ? info_stack->value : "NA") << std::endl;
+                      << ", info_stack: " << (info_stack != nullptr ? info_stack->value : "NA") << std::endl;
         },
         // Note:
         // This handler will be called if there is an std::exception_ptr available, which there will be in
@@ -107,12 +107,13 @@ auto make_ehandlers() {
             leaf::try_([&] { std::rethrow_exception(ep); },
                        [&](leaf::catch_<std::runtime_error> e) {
                            std::cout << "Error: runtime_error: " << e.value().what()
-                                     << ", info_stack: " << (info_stack ? info_stack->value : "NA") << std::endl;
+                                     << ", info_stack: " << (info_stack != nullptr ? info_stack->value : "NA")
+                                     << std::endl;
                        },
                        [&](leaf::error_info const &e, leaf::verbose_diagnostic_info const &diag) {
                            std::cout << "Error: unmatched exception, what: "
                                      << (e.has_exception() ? e.exception()->what() : "<NA>")
-                                     << ", info_stack: " << (info_stack ? info_stack->value : "NA")
+                                     << ", info_stack: " << (info_stack != nullptr ? info_stack->value : "NA")
                                      << ", diagnostic:" << diag << std::endl;
                        });
         },
@@ -123,30 +124,33 @@ auto make_ehandlers() {
         [](std::error_code const &ec) { std::cout << "Error: error_code: " << ec << ":" << ec.message() << std::endl; },
         [](leaf::verbose_diagnostic_info const &diag, e_failure_info_stack const *info_stack) {
             std::cout << "Error: unmatched error"
-                      << ", info_stack: " << (info_stack ? info_stack->value : "NA") << ", diagnostic:" << diag
-                      << std::endl;
+                      << ", info_stack: " << (info_stack != nullptr ? info_stack->value : "NA")
+                      << ", diagnostic:" << diag << std::endl;
         });
 }
 
 int main() {
-    std::cout << "std::errc::address_in_use is: " << (int)std::errc::address_in_use << std::endl;
+    try {
+        for (unsigned i = 0; i < 10; ++i) {
+            asio::io_context io_context;
+            std::cout << "\nf2(" << i << ")" << std::endl;
+            auto ehandlers = make_ehandlers();
 
-    for (unsigned i = 0; i < 10; ++i) {
-        asio::io_context io_context;
-        std::cout << "\nf2(" << i << ")" << std::endl;
-        auto ehandlers = make_ehandlers();
-
-        async_operation::start(io_context, i,
-                               async_utils::bind_ehandlers_type<decltype(ehandlers)>([&](leaf::result<int> result) {
-                                   leaf::handle_all(
-                                       [&result]() -> leaf::result<void> {
-                                           LEAF_CHECK(result);
-                                           std::cout << "Success" << std::endl;
-                                           return {};
-                                       },
-                                       ehandlers);
-                               }));
-        io_context.run();
+            async_operation::start(io_context, i,
+                                   async_utils::bind_ehandlers_type<decltype(ehandlers)>([&](leaf::result<int> result) {
+                                       leaf::handle_all(
+                                           [&result]() -> leaf::result<void> {
+                                               // NOLINTNEXTLINE
+                                               LEAF_CHECK(result);
+                                               std::cout << "Success" << std::endl;
+                                               return {};
+                                           },
+                                           ehandlers);
+                                   }));
+            io_context.run();
+        }
+    } catch (std::exception const &e) {
+        std::cout << "Error: " << e.what() << "\n";
     }
     return 0;
 }

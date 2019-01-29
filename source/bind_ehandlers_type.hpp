@@ -9,7 +9,7 @@ namespace async_utils {
 
 // Associates an object of type T with an E-handlers type.
 template <typename T, typename EHandlers> struct ehandlers_type_binder {
-    ehandlers_type_binder(T &&target) : target(std::move(target)) {}
+    explicit ehandlers_type_binder(T &&target) : target(std::move(target)) {}
 
     using target_type = T;
     using ehandlers_type = EHandlers;
@@ -30,22 +30,24 @@ template <typename T, typename EHandlers> struct ehandlers_type_binder {
 
 // Associates an object of type T with an E-handlers type.
 template <typename EHandlers, typename T>
-inline decltype(auto) bind_ehandlers_type(T &&target, EHandlers const * = nullptr) {
+inline decltype(auto) bind_ehandlers_type(T &&target, EHandlers const * /*unused*/ = nullptr) {
     return ehandlers_type_binder<typename std::decay_t<T>, EHandlers>(std::forward<T>(target));
 }
 // Associates an object of type T with an E-handlers type.
-template <typename EHandlers, typename T> inline decltype(auto) bind_ehandlers_type(T &&target, EHandlers const &) {
+template <typename EHandlers, typename T>
+inline decltype(auto) bind_ehandlers_type(T &&target, EHandlers const & /*unused*/) {
     return ehandlers_type_binder<typename std::decay_t<T>, EHandlers>(std::forward<T>(target));
 }
 
 // Associates an object of type T with an E-handlers type retrieved from another type.
 template <typename From, typename T>
-inline decltype(auto) bind_ehandlers_type_from(T &&target, From const * = nullptr) {
+inline decltype(auto) bind_ehandlers_type_from(T &&target, From const * /*unused*/ = nullptr) {
     using ehandlers_type = associated_ehandlers_type_t<From>;
     return bind_ehandlers_type<ehandlers_type>(std::forward<T>(target));
 }
 // Associates an object of type T with an E-handlers type retrieved from another type.
-template <typename From, typename T> inline decltype(auto) bind_ehandlers_type_from(T &&target, From const &) {
+template <typename From, typename T>
+inline decltype(auto) bind_ehandlers_type_from(T &&target, From const & /*unused*/) {
     using ehandlers_type = associated_ehandlers_type_t<From>;
     return bind_ehandlers_type<ehandlers_type>(std::forward<T>(target));
 }

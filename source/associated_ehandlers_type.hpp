@@ -7,12 +7,12 @@ namespace async_utils {
 
 namespace detail {
 
-template <typename> struct associated_ehandlers_type_check { typedef void type; };
+template <typename> struct associated_ehandlers_type_check { using type = void; };
 
-template <typename T, typename E, typename = void> struct associated_ehandlers_type_impl { typedef E type; };
+template <typename T, typename E, typename = void> struct associated_ehandlers_type_impl { using type = E; };
 template <typename T, typename E>
 struct associated_ehandlers_type_impl<T, E, typename associated_ehandlers_type_check<typename T::type_type>::type> {
-    typedef typename T::ehandlers_type type;
+    using type = typename T::ehandlers_type;
 };
 
 } // namespace detail
