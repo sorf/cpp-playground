@@ -34,7 +34,8 @@ set(TESTS
     asio_composed_one_flow; asio_composed_one_flow_async_op; asio_composed_one_flow_compose;
     asio_composed;
     asio_echo_server;
-    leaf_test
+    leaf_test;
+    asio_echo_server_leaf;
     )
 foreach(test_name ${TESTS})
     define_test_executable(${test_name} ${test_name}.cpp)
