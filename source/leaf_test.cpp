@@ -8,6 +8,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/assert.hpp>
 #include <boost/leaf/all.hpp>
+#include <boost/range/adaptor/reversed.hpp>
 #include <iostream>
 #include <string>
 #include <system_error>
@@ -48,17 +49,6 @@ struct [[nodiscard]] info_stack_appender {
     std::string_view m_info;
 };
 
-std::string info_stack_to_string(info_stack_type const &info_stack) {
-    std::string str;
-    for (auto s : info_stack) {
-        if (!str.empty()) {
-            str += ">";
-        }
-        str += s;
-    }
-    return str;
-}
-
 info_stack_type *&tl_get_info_stack() noexcept {
     static thread_local info_stack_type *info_stack = nullptr;
     return info_stack;
@@ -67,14 +57,16 @@ info_stack_type *&tl_get_info_stack() noexcept {
 void tl_set_info_stack(info_stack_type &info_stack) noexcept { tl_get_info_stack() = &info_stack; }
 void tl_set_info_stack(info_stack_type *info_stack) noexcept { tl_get_info_stack() = info_stack; }
 
-decltype(auto) tl_append_info_stack(std::string_view info) {
-    return info_stack_appender(tl_get_info_stack(), info);
-}
+decltype(auto) tl_append_info_stack(std::string_view info) { return info_stack_appender(tl_get_info_stack(), info); }
 
 struct e_failure_info_stack {
-    e_failure_info_stack() {
+    // The constructor of an e-type must not throw.
+    e_failure_info_stack() noexcept {
         if (auto info_stack = tl_get_info_stack()) {
-            value = *info_stack;
+            try {
+                value.first = *info_stack;
+            } catch (...) {
+            }
         }
     }
     e_failure_info_stack(e_failure_info_stack const &) = delete;
@@ -82,11 +74,37 @@ struct e_failure_info_stack {
     e_failure_info_stack &operator=(e_failure_info_stack const &) = delete;
     e_failure_info_stack &operator=(e_failure_info_stack &&other) = delete;
 
-    info_stack_type value;
+    // The operations executed in leaf::accumulate must not throw.
+    void push_back(std::string_view info) noexcept {
+        try {
+            value.second.push_back(info);
+        } catch (...) {
+        }
+    }
+
+    std::pair<info_stack_type, info_stack_type> value;
 };
 
 std::string info_stack_to_string(e_failure_info_stack const *info_stack) {
-    return info_stack != nullptr ? info_stack_to_string(info_stack->value) : "";
+    if (info_stack == nullptr) {
+        return "";
+    }
+
+    std::string str;
+    auto append = [&](auto const &s) {
+        if (!str.empty()) {
+            str += ">";
+        }
+        str += s;
+    };
+
+    for (auto const &s : info_stack->value.first) {
+        append(s);
+    }
+    for (auto const &s : boost::adaptors::reverse(info_stack->value.second)) {
+        append(s);
+    }
+    return str;
 }
 
 enum custom_error_code { first_error = 1, second_error };
@@ -97,8 +115,7 @@ template <> struct is_e_type<custom_error_code> : std::true_type {};
 } // namespace boost
 
 void f1(unsigned behavior) {
-    [[maybe_unused]] auto p1 = leaf::defer([] { return e_failure_info_stack(); });
-    [[maybe_unused]] auto p2 = leaf::accumulate([](e_failure_info_stack &info) { info.value.push_back("f1"); });
+    [[maybe_unused]] auto p2 = leaf::accumulate([](e_failure_info_stack &info) { info.push_back("f1"); });
 
     switch (behavior) {
     case 0:
@@ -120,8 +137,7 @@ leaf::result<unsigned> f2(unsigned behavior) {
         throw std::runtime_error("what-f2-1");
     }
 
-    [[maybe_unused]] auto p1 = leaf::defer([] { return e_failure_info_stack(); });
-    [[maybe_unused]] auto p2 = leaf::accumulate([](e_failure_info_stack &info) { info.value.push_back("f2"); });
+    [[maybe_unused]] auto p2 = leaf::accumulate([](e_failure_info_stack &info) { info.push_back("f2"); });
 
     switch (behavior) {
     case 0:
@@ -165,8 +181,7 @@ struct async_operation {
         [[maybe_unused]] auto info = tl_append_info_stack("execute1");
 
         h(async_utils::leaf_call<unsigned>(async_utils::bind_ehandlers_type_from<Handler>([&]() mutable {
-            [[maybe_unused]] auto p1 = leaf::defer([] { return e_failure_info_stack(); });
-            [[maybe_unused]] auto p2 = leaf::accumulate([](e_failure_info_stack &info) { info.value.push_back("execute2"); });
+            [[maybe_unused]] auto p2 = leaf::accumulate([](e_failure_info_stack &info) { info.push_back("execute2"); });
             return f2(behavior);
         })));
     }
