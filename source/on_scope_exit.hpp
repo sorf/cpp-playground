@@ -2,6 +2,7 @@
 #define ON_SCOPE_EXIT_HPP
 
 #include <boost/log/utility/unique_identifier_name.hpp>
+#include <optional>
 #include <utility>
 
 namespace async_utils {
@@ -9,13 +10,21 @@ namespace async_utils {
 template <typename F> struct scope_exit {
     explicit scope_exit(F &&f) : m_f(std::move(f)) {}
     scope_exit(scope_exit const &) = delete;
-    scope_exit(scope_exit &&) = delete;
+    scope_exit(scope_exit &&other) noexcept : m_f(std::move(other.m_f)) { other.m_f.reset(); }
     scope_exit &operator=(scope_exit const &) = delete;
     scope_exit &operator=(scope_exit &&other) = delete;
-    ~scope_exit() { m_f(); }
+    ~scope_exit() { reset(); }
+
+    void reset() noexcept {
+        if (m_f) {
+            auto f = std::move(m_f);
+            m_f.reset(); // Note: a moved-from optional still contains a value
+            (*f)();
+        }
+    }
 
   private:
-    F m_f;
+    std::optional<F> m_f;
 };
 
 // Executes a lambda at scope exit.
