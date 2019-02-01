@@ -19,90 +19,28 @@ namespace leaf = boost::leaf;
 
 using info_stack_type = std::vector<std::string_view>;
 
-struct [[nodiscard]] info_stack_appender {
-    explicit info_stack_appender(info_stack_type * info_stack, std::string_view info)
-        : m_info_stack(info_stack), m_info(info) {
-        if (m_info_stack) {
-            m_info_stack->push_back(info);
-        }
-    }
-
-    info_stack_appender(info_stack_appender const &) = delete;
-    info_stack_appender(info_stack_appender && other) : m_info_stack(other.m_info_stack), m_info(other.m_info) {
-        other.m_info_stack = nullptr;
-    }
-
-    info_stack_appender &operator=(info_stack_appender const &) = delete;
-    info_stack_appender &operator=(info_stack_appender &&other) = delete;
-    ~info_stack_appender() { reset(); }
-
-    void reset() noexcept {
-        if (m_info_stack) {
-            BOOST_ASSERT(m_info_stack->back() == m_info);
-            m_info_stack->pop_back();
-        }
-        m_info_stack = nullptr;
-    }
-
-  private:
-    info_stack_type *m_info_stack;
-    std::string_view m_info;
-};
-
-info_stack_type *&tl_get_info_stack() noexcept {
-    static thread_local info_stack_type *info_stack = nullptr;
-    return info_stack;
-}
-
-void tl_set_info_stack(info_stack_type &info_stack) noexcept { tl_get_info_stack() = &info_stack; }
-void tl_set_info_stack(info_stack_type *info_stack) noexcept { tl_get_info_stack() = info_stack; }
-
-decltype(auto) tl_append_info_stack(std::string_view info) { return info_stack_appender(tl_get_info_stack(), info); }
-
 struct e_failure_info_stack {
-    // The constructor of an e-type must not throw.
-    e_failure_info_stack() noexcept {
-        if (auto info_stack = tl_get_info_stack()) {
-            try {
-                value.first = *info_stack;
-            } catch (...) {
-            }
-        }
-    }
-    e_failure_info_stack(e_failure_info_stack const &) = delete;
-    e_failure_info_stack(e_failure_info_stack &&) = default;
-    e_failure_info_stack &operator=(e_failure_info_stack const &) = delete;
-    e_failure_info_stack &operator=(e_failure_info_stack &&other) = delete;
-
     // The operations executed in leaf::accumulate must not throw.
     void push_back(std::string_view info) noexcept {
         try {
-            value.second.push_back(info);
+            value.push_back(info);
         } catch (...) {
         }
     }
 
-    std::pair<info_stack_type, info_stack_type> value;
+    info_stack_type value;
 };
 
 std::string info_stack_to_string(e_failure_info_stack const *info_stack) {
     if (info_stack == nullptr) {
         return "";
     }
-
     std::string str;
-    auto append = [&](auto const &s) {
+    for (auto const &s : boost::adaptors::reverse(info_stack->value)) {
         if (!str.empty()) {
             str += ">";
         }
         str += s;
-    };
-
-    for (auto const &s : info_stack->value.first) {
-        append(s);
-    }
-    for (auto const &s : boost::adaptors::reverse(info_stack->value.second)) {
-        append(s);
     }
     return str;
 }
@@ -164,31 +102,33 @@ struct async_operation {
     }
 
   public:
-    template <typename Handler> static void start(asio::io_context &io_context, unsigned behavior, Handler &&h) {
-        auto info_stack = tl_get_info_stack();
-        auto op_info = tl_append_info_stack("async_operation");
+    template <typename LeafAccumulator, typename Handler>
+    static void start(asio::io_context &io_context, unsigned behavior, LeafAccumulator &&acc, Handler &&h) {
+        auto next_acc = async_utils::defer_accumulate(
+            std::forward<LeafAccumulator>(acc), [](e_failure_info_stack &info) { info.push_back("async_operation"); });
 
+        auto executor = get_executor(io_context, h);
         asio::post(io_context, async_utils::bind_ehandlers_type_from<Handler>(asio::bind_executor(
-                                   get_executor(io_context, h),
-                                   [=, h = std::forward<Handler>(h), op_info = std::move(op_info)]() mutable {
-                                       tl_set_info_stack(info_stack);
-                                       execute(behavior, std::move(h));
+                                   executor, [=, acc = std::move(next_acc), h = std::forward<Handler>(h)]() mutable {
+                                       execute(behavior, std::move(acc), std::move(h));
                                    })));
     }
 
   private:
-    template <typename Handler> static void execute(unsigned behavior, Handler &&h) {
-        [[maybe_unused]] auto info = tl_append_info_stack("execute1");
+    template <typename Handler, typename LeafAccumulator>
+    static void execute(unsigned behavior, LeafAccumulator &&acc, Handler &&h) {
+        auto next_acc =
+            async_utils::defer_accumulate(std::forward<LeafAccumulator>(acc), [](e_failure_info_stack &info) {
+                info.push_back("async_operation::execute");
+            });
 
-        h(async_utils::leaf_call<unsigned>(async_utils::bind_ehandlers_type_from<Handler>([&]() mutable {
-            [[maybe_unused]] auto p2 = leaf::accumulate([](e_failure_info_stack &info) { info.push_back("execute2"); });
-            return f2(behavior);
-        })));
+        h(async_utils::leaf_call<unsigned>(std::move(next_acc), async_utils::bind_ehandlers_type_from<Handler>(
+                                                                    [&]() mutable { return f2(behavior); })));
     }
 };
 
-auto make_ehandlers() {
-    return [](leaf::error const &error) {
+auto make_error_handler() {
+    return [](leaf::error_in_remote_handle_all const &error) {
         return leaf::handle_error(
             error,
             [](custom_error_code ec, e_failure_info_stack const *info_stack) {
@@ -235,21 +175,20 @@ int main() {
             asio::io_context io_context;
             std::cout << "\nf2(" << i << ")" << std::endl;
 
-            info_stack_type info_stack;
-            tl_set_info_stack(info_stack);
-            [[maybe_unused]] auto info = tl_append_info_stack("main");
-            auto ehandlers = make_ehandlers();
-            async_operation::start(io_context, i,
-                                   async_utils::bind_ehandlers_type<decltype(ehandlers)>([&](leaf::result<int> result) {
-                                       leaf::bound_handle_all(
-                                           [&result]() -> leaf::result<void> {
-                                               // NOLINTNEXTLINE
-                                               LEAF_CHECK(result);
-                                               std::cout << "Success" << std::endl;
-                                               return {};
-                                           },
-                                           [&](leaf::error const &error) { return ehandlers(error); });
-                                   }));
+            auto ehandlers = make_error_handler();
+            auto acc = async_utils::defer_accumulate([](e_failure_info_stack &info) { info.push_back("main"); });
+            async_operation::start(
+                io_context, i, std::move(acc),
+                async_utils::bind_ehandlers_type<decltype(ehandlers)>([&](leaf::result<int> result) {
+                    leaf::remote_handle_all(
+                        [&result]() -> leaf::result<void> {
+                            // NOLINTNEXTLINE
+                            LEAF_CHECK(result);
+                            std::cout << "Success" << std::endl;
+                            return {};
+                        },
+                        [&](leaf::error_in_remote_handle_all const &error) { return ehandlers(error); });
+                }));
             io_context.run();
         }
     } catch (std::exception const &e) {
