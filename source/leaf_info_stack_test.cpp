@@ -1,6 +1,8 @@
 #include <boost/leaf/all.hpp>
+#include <functional>
 #include <future>
 #include <iostream>
+#include <list>
 
 namespace leaf = boost::leaf;
 
@@ -18,20 +20,17 @@ template <typename LeafAccumulator, typename F> decltype(auto) defer_accumulate(
     };
 }
 
-template <typename ErrorHandler, typename F> decltype(auto) initiate_operation(F &&f) {
-    auto acc = defer_accumulate([](e_stack &) { std::cout << "stack: initiate\n"; });
+template <typename ErrorHandler, typename LeafAccumulator, typename F>
+decltype(auto) initiate_operation(LeafAccumulator &&acc, F &&f) {
+    auto next_acc =
+        defer_accumulate(std::forward<LeafAccumulator>(acc), [](e_stack &) { std::cout << "stack: initiate\n"; });
 
-    return [f = std::forward<F>(f), acc_prev = std::move(acc)] {
-        auto acc = defer_accumulate(std::move(acc_prev), [](e_stack &) { std::cout << "stack: continuation1\n"; });
+    return [f = std::forward<F>(f), acc = std::move(next_acc)] {
+        auto next_acc = defer_accumulate(std::move(acc), [](e_stack &) { std::cout << "stack: continuation\n"; });
 
-        auto r = leaf::capture_in_result<ErrorHandler>([acc_prev = std::move(acc)]() -> leaf::result<int> {
-            auto acc = defer_accumulate(std::move(acc_prev), [](e_stack &) { std::cout << "stack: continuation2\n"; });
-
-            return leaf::exception_to_result([acc_prev = std::move(acc)]() -> leaf::result<int> {
-                auto acc =
-                    defer_accumulate(std::move(acc_prev), [](e_stack &) { std::cout << "stack: continuation3\n"; });
-
-                [[maybe_unused]] auto acc_now = acc();
+        auto r = leaf::capture_in_result<ErrorHandler>([&]() -> leaf::result<int> {
+            return leaf::exception_to_result([&]() -> leaf::result<int> {
+                [[maybe_unused]] auto acc_now = next_acc();
                 throw std::runtime_error("X");
             });
         });
@@ -48,16 +47,18 @@ int main() {
             });
         };
 
-        auto continuation = initiate_operation<decltype(error_handler)>([&](leaf::result<int> result) {
-            leaf::remote_handle_all(
-                [&result]() -> leaf::result<void> {
-                    // NOLINTNEXTLINE
-                    LEAF_CHECK(result);
-                    std::cout << "Success" << std::endl;
-                    return {};
-                },
-                [&](leaf::error_in_remote_handle_all const &error) { return error_handler(error); });
-        });
+        auto acc = defer_accumulate([](e_stack &) { std::cout << "stack: main\n"; });
+        auto continuation =
+            initiate_operation<decltype(error_handler)>(std::move(acc), [&error_handler](leaf::result<int> result) {
+                leaf::remote_handle_all(
+                    [&result]() -> leaf::result<void> {
+                        // NOLINTNEXTLINE
+                        LEAF_CHECK(result);
+                        std::cout << "Success" << std::endl;
+                        return {};
+                    },
+                    [&](leaf::error_in_remote_handle_all const &error) { return error_handler(error); });
+            });
 
         auto f = std::async(std::move(continuation));
         f.get();
