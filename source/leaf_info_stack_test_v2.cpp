@@ -88,28 +88,25 @@ struct operation_2 {
 
 int main() {
     try {
-        auto try_error_handler = [](leaf::error_in_remote_try_ const &error) {
-            return leaf::handle_error(error, [](leaf::verbose_diagnostic_info const &diag, e_stack const *e) {
-                std::cout << "Try-Error: "
-                          << "any_stack: " << (e != nullptr ? "YES" : "NO") << ", diagnostic:" << diag << std::endl;
-            });
+        auto handle_error_impl =
+            [](leaf::verbose_diagnostic_info const &diag, e_stack const *e) {
+                std::cout << "Error: any_stack: " << (e != nullptr ? "YES" : "NO") << ", diagnostic:" << diag
+                          << std::endl;
+            };
+
+        auto try_error_handler = [&](leaf::error_in_remote_try_ const &error) {
+            return leaf::handle_error(
+                error, [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) { handle_error_impl(diag, e); });
         };
 
         auto error_handler = [&](leaf::error_in_remote_handle_all const &error) {
-            return leaf::handle_error(error,
-                                      [&](std::exception_ptr const &ep, e_stack const *e) {
-                                          leaf::try_([&] { std::rethrow_exception(ep); },
-                                                     [&](leaf::verbose_diagnostic_info const &diag) {
-                                                         std::cout << "Error-Try: "
-                                                                   << "any_stack: " << (e != nullptr ? "YES" : "NO")
-                                                                   << ", diagnostic:" << diag << std::endl;
-                                                     });
-                                      },
-                                      [](leaf::verbose_diagnostic_info const &diag, e_stack const *e) {
-                                          std::cout << "Error: "
-                                                    << "any_stack: " << (e != nullptr ? "YES" : "NO")
-                                                    << ", diagnostic:" << diag << std::endl;
-                                      });
+            return leaf::handle_error(
+                error,
+                [&](std::exception_ptr const &ep, e_stack const *e) {
+                    leaf::try_([&] { std::rethrow_exception(ep); },
+                               [&](leaf::verbose_diagnostic_info const &diag) { handle_error_impl(diag, e); });
+                },
+                [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) { handle_error_impl(diag, e); });
         };
 
         bool retry = true;
