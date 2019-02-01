@@ -99,7 +99,7 @@ int main() {
                 error, [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) { handle_error_impl(diag, e); });
         };
 
-        auto error_handler = [&](leaf::error_in_remote_handle_all const &error) {
+        auto all_error_handler = [&](leaf::error_in_remote_handle_all const &error) {
             return leaf::handle_error(
                 error,
                 [&](std::exception_ptr const &ep, e_stack const *e) {
@@ -108,6 +108,7 @@ int main() {
                 },
                 [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) { handle_error_impl(diag, e); });
         };
+        using all_error_handler_type = decltype(all_error_handler);
 
         bool retry = true;
         std::size_t start_count = 1;
@@ -119,7 +120,7 @@ int main() {
 
                 leaf::remote_try_(
                     [&] {
-                        operation_2::start(io_context, async_utils::bind_ehandlers_type<decltype(error_handler)>(
+                        operation_2::start(io_context, async_utils::bind_ehandlers_type<all_error_handler_type>(
                                                            [&](leaf::result<void> r) -> leaf::result<void> {
                                                                leaf::remote_handle_all(
                                                                    [&]() -> leaf::result<void> {
@@ -130,7 +131,7 @@ int main() {
                                                                        return {};
                                                                    },
                                                                    [&](leaf::error_in_remote_handle_all const &error) {
-                                                                       return error_handler(error);
+                                                                       return all_error_handler(error);
                                                                    });
                                                                return {};
                                                            }));
