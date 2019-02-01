@@ -23,28 +23,31 @@ std::size_t &failure_counter() {
 
 void set_failure_counter(std::size_t start_count) { failure_counter() = start_count; }
 
-void failure_point() {
+void failure_point(int line) {
     std::size_t &counter = failure_counter();
 
-    if (counter) {
+    if (counter != 0) {
         --counter;
     }
-    if (!counter) {
-        throw std::runtime_error("X");
+    if (counter == 0) {
+        throw std::runtime_error("error at line: " + std::to_string(line));
     }
 }
+
+#define FAILURE_POINT()  failure_point(__LINE__)
+
 
 struct operation_1 {
 
     template <typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
         [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: operation_1::start\n"; });
-        failure_point();
+        FAILURE_POINT();
         asio::post(io_context, async_utils::bind_ehandlers_type_from<Handler>([h = std::forward<Handler>(h)]() mutable {
                        using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
                        auto r = async_utils::leaf_call<void, error_handler_type>([]() -> leaf::result<void> {
                            [[maybe_unused]] auto acc =
                                leaf::accumulate([](e_stack &) { std::cout << "stack: operation_1::cont\n"; });
-                           failure_point();
+                           FAILURE_POINT();
                            return {};
                        });
                        h(r);
@@ -56,7 +59,7 @@ struct operation_2 {
 
     template <typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
         [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: operation_2::start\n"; });
-        failure_point();
+        FAILURE_POINT();
         operation_1::start(
             io_context, async_utils::bind_ehandlers_type_from<Handler>(
                             [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
@@ -75,7 +78,7 @@ struct operation_2 {
 
     template <typename Handler> static void cont_1(asio::io_context &io_context, Handler &&h) {
         [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: operation_2::cont_1\n"; });
-        failure_point();
+        FAILURE_POINT();
         operation_1::start(io_context,
                            async_utils::bind_ehandlers_type_from<Handler>(
                                [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
@@ -84,7 +87,7 @@ struct operation_2 {
                                        r = async_utils::leaf_call<void, error_handler_type>([]() -> leaf::result<void> {
                                            [[maybe_unused]] auto acc = leaf::accumulate(
                                                [](e_stack &) { std::cout << "stack: operation_2::cont_2\n"; });
-                                           failure_point();
+                                           FAILURE_POINT();
                                            return {};
                                        });
                                    }
