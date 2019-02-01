@@ -25,7 +25,7 @@ decltype(auto) initiate_operation(LeafAccumulator &&acc, F &&f) {
     auto next_acc =
         defer_accumulate(std::forward<LeafAccumulator>(acc), [](e_stack &) { std::cout << "stack: initiate\n"; });
 
-    return [f = std::forward<F>(f), acc = std::move(next_acc)] {
+    return [acc = std::move(next_acc), f = std::forward<F>(f)] {
         auto next_acc = defer_accumulate(std::move(acc), [](e_stack &) { std::cout << "stack: continuation\n"; });
 
         auto r = leaf::capture_in_result<ErrorHandler>([&]() -> leaf::result<int> {
