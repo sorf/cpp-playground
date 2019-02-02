@@ -1,15 +1,39 @@
 #include "bind_ehandlers_type.hpp"
 #include "leaf_call.hpp"
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/post.hpp>
 #include <boost/leaf/all.hpp>
 #include <functional>
 #include <future>
 #include <iostream>
 #include <list>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <list>
 
-namespace asio = boost::asio;
+namespace asio_simulator {
+
+struct io_context {
+
+    void run() {
+        while (!execution_queue.empty()) {
+            auto e = std::move(execution_queue.back());
+            execution_queue.pop_back();
+            e();
+        }
+    }
+
+    std::list<std::function<void()>> execution_queue;
+}; 
+
+template <typename F>
+void post(io_context &io_context, F&& f) {
+    io_context.execution_queue.emplace_back(std::forward<F>(f));
+}
+
+} // namespace asio_simulator
+
+namespace asio = asio_simulator;
 namespace leaf = boost::leaf;
 
 struct e_stack {
@@ -34,19 +58,24 @@ void failure_point(int line) {
     }
 }
 
-#define FAILURE_POINT()  failure_point(__LINE__)
+#define FAILURE_POINT() failure_point(__LINE__)
 
-
-struct operation_1 {
+// opA:
+//          +--asio::post()--+
+//          ^                V
+//      start                cont -+
+//                                 V
+//                             call handler
+struct opA {
 
     template <typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: operation_1::start\n"; });
+        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opA::start\n"; });
         FAILURE_POINT();
         asio::post(io_context, async_utils::bind_ehandlers_type_from<Handler>([h = std::forward<Handler>(h)]() mutable {
                        using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
                        auto r = async_utils::leaf_call<void, error_handler_type>([]() -> leaf::result<void> {
                            [[maybe_unused]] auto acc =
-                               leaf::accumulate([](e_stack &) { std::cout << "stack: operation_1::cont\n"; });
+                               leaf::accumulate([](e_stack &) { std::cout << "stack: opA::cont\n"; });
                            FAILURE_POINT();
                            return {};
                        });
@@ -55,44 +84,93 @@ struct operation_1 {
     }
 };
 
-struct operation_2 {
+// opB:
+//          +--opA::start()--+    +--opA::start()--+
+//          ^                V    ^                V
+//      start                cont_1                cont_2 -+
+//                                                         V
+//                                                     call handler
+struct opB {
 
     template <typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: operation_2::start\n"; });
+        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::start\n"; });
         FAILURE_POINT();
-        operation_1::start(
-            io_context, async_utils::bind_ehandlers_type_from<Handler>(
-                            [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-                                if (r) {
-                                    using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
-                                    r = async_utils::leaf_call<void, error_handler_type>([&]() -> leaf::result<void> {
-                                        cont_1(io_context, std::move(h));
-                                        return {};
-                                    });
-                                }
-                                if (!r) {
-                                    h(r); // NOTE: We assume `cont_1` failed before moving `h`
-                                }
-                            }));
+        opA::start(io_context, async_utils::bind_ehandlers_type_from<Handler>([&, h = std::forward<Handler>(h)](
+                                                                                  leaf::result<void> r) mutable {
+                       if (r) {
+                           using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
+                           r = async_utils::leaf_call<void, error_handler_type>([&]() -> leaf::result<void> {
+                               cont_1(io_context, std::move(h));
+                               return {};
+                           });
+                       }
+                       if (!r) {
+                           h(r); // NOTE: We assume `cont_1` failed before moving `h`
+                       }
+                   }));
     }
 
     template <typename Handler> static void cont_1(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: operation_2::cont_1\n"; });
+        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont_1\n"; });
         FAILURE_POINT();
-        operation_1::start(io_context,
-                           async_utils::bind_ehandlers_type_from<Handler>(
-                               [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-                                   if (r) {
-                                       using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
-                                       r = async_utils::leaf_call<void, error_handler_type>([]() -> leaf::result<void> {
-                                           [[maybe_unused]] auto acc = leaf::accumulate(
-                                               [](e_stack &) { std::cout << "stack: operation_2::cont_2\n"; });
-                                           FAILURE_POINT();
-                                           return {};
-                                       });
-                                   }
-                                   h(r);
-                               }));
+        opA::start(io_context, async_utils::bind_ehandlers_type_from<Handler>([h = std::forward<Handler>(h)](
+                                                                                  leaf::result<void> r) mutable {
+                       if (r) {
+                           using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
+                           r = async_utils::leaf_call<void, error_handler_type>([]() -> leaf::result<void> {
+                               [[maybe_unused]] auto acc =
+                                   leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont_2\n"; });
+                               FAILURE_POINT();
+                               return {};
+                           });
+                       }
+                       h(r);
+                   }));
+    }
+};
+
+// opC:
+//          +--opB::start()--+    +--opB::start()--+
+//          ^                V    ^                V
+//      start                cont_1                cont_2 -+
+//                                                         V
+//                                                     call handler
+struct opC {
+
+    template <typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
+        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::start\n"; });
+        FAILURE_POINT();
+        opB::start(io_context, async_utils::bind_ehandlers_type_from<Handler>([&, h = std::forward<Handler>(h)](
+                                                                                  leaf::result<void> r) mutable {
+                       if (r) {
+                           using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
+                           r = async_utils::leaf_call<void, error_handler_type>([&]() -> leaf::result<void> {
+                               cont_1(io_context, std::move(h));
+                               return {};
+                           });
+                       }
+                       if (!r) {
+                           h(r); // NOTE: We assume `cont_1` failed before moving `h`
+                       }
+                   }));
+    }
+
+    template <typename Handler> static void cont_1(asio::io_context &io_context, Handler &&h) {
+        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont_1\n"; });
+        FAILURE_POINT();
+        opB::start(io_context, async_utils::bind_ehandlers_type_from<Handler>([h = std::forward<Handler>(h)](
+                                                                                  leaf::result<void> r) mutable {
+                       if (r) {
+                           using error_handler_type = async_utils::associated_ehandlers_type_t<Handler>;
+                           r = async_utils::leaf_call<void, error_handler_type>([]() -> leaf::result<void> {
+                               [[maybe_unused]] auto acc =
+                                   leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont_2\n"; });
+                               FAILURE_POINT();
+                               return {};
+                           });
+                       }
+                       h(r);
+                   }));
     }
 };
 
@@ -130,7 +208,7 @@ int main() {
                 leaf::remote_try_(
                     [&] {
                         [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: main\n"; });
-                        operation_2::start(io_context, async_utils::bind_ehandlers_type<all_error_handler_type>(
+                        opC::start(io_context, async_utils::bind_ehandlers_type<all_error_handler_type>(
                                                            [&](leaf::result<void> r) -> leaf::result<void> {
                                                                leaf::remote_handle_all(
                                                                    [&]() -> leaf::result<void> {
