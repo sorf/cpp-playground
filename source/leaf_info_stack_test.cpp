@@ -6,10 +6,6 @@
 #include <future>
 #include <iostream>
 #include <list>
-#include <functional>
-#include <future>
-#include <iostream>
-#include <list>
 
 namespace asio_simulator {
 
