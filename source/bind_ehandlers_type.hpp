@@ -9,13 +9,13 @@ namespace async_utils {
 
 // Associates an object of type T with an E-handlers type.
 template <typename T, typename EHandlers> struct ehandlers_type_binder {
-    explicit ehandlers_type_binder(T &&target) : target(std::move(target)) {}
+    explicit ehandlers_type_binder(T &&target) : target{std::move(target)} {}
 
     using target_type = T;
     using ehandlers_type = EHandlers;
 
     target_type &get() noexcept { return this->target; }
-    const target_type &get() const noexcept { return this->target; }
+    target_type const &get() const noexcept { return this->target; }
 
     template <class... Args> decltype(auto) operator()(Args &&... args) const {
         return std::invoke(target, std::forward<Args>(args)...);

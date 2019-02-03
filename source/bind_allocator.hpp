@@ -8,13 +8,13 @@ namespace async_utils {
 
 // Associates an object of type T with an allocator.
 template <typename T, typename Allocator> struct allocator_binder {
-    allocator_binder(T &&target, Allocator &&allocator) : target(std::move(target)), allocator(std::move(allocator)) {}
+    allocator_binder(T &&target, Allocator &&allocator) : target{std::move(target)}, allocator{std::move(allocator)} {}
 
     using target_type = T;
     using allocator_type = Allocator;
 
     target_type &get() noexcept { return this->target; }
-    const target_type &get() const noexcept { return this->target; }
+    target_type const &get() const noexcept { return this->target; }
     allocator_type get_allocator() const noexcept { return this->allocator; }
 
     template <class... Args> decltype(auto) operator()(Args &&... args) const {

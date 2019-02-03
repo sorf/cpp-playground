@@ -7,12 +7,18 @@
 
 namespace async_utils {
 
-template <typename F> struct scope_exit {
-    explicit scope_exit(F &&f) : m_f(std::move(f)) {}
+template <typename F> struct [[nodiscard]] scope_exit {
+    explicit scope_exit(F && f) : m_f(std::move(f)) {}
     scope_exit(scope_exit const &) = delete;
-    scope_exit(scope_exit &&other) noexcept : m_f(std::move(other.m_f)) { other.m_f.reset(); }
+    scope_exit(scope_exit && other) noexcept : m_f(std::move(other.m_f)) { other.m_f.reset(); }
     scope_exit &operator=(scope_exit const &) = delete;
-    scope_exit &operator=(scope_exit &&other) = delete;
+    scope_exit &operator=(scope_exit &&other) noexcept {
+        reset();
+        m_f = std::move(other.m_f);
+        other.m_f.reset();
+        return *this;
+    }
+
     ~scope_exit() { reset(); }
 
     void reset() noexcept {
