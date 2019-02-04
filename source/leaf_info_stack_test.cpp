@@ -111,11 +111,7 @@ struct opA {
                 FAILURE_POINT();
                 return {};
             });
-            if (r) {
-                h(r);
-            } else {
-                h(r.error());
-            }
+            h(r);
         });
     }
 };
@@ -141,7 +137,7 @@ struct opB {
             }
             // NOTE: We assume `cont_impl` failed before moving `h`
             if (!r) {
-                h(r.error());
+                h(r);
             }
         });
     }
@@ -159,11 +155,7 @@ struct opB {
                     return {};
                 });
             }
-            if (r) {
-                h(r);
-            } else {
-                h(r.error());
-            }
+            h(r);
         });
     }
 };
@@ -189,7 +181,7 @@ struct opC {
             }
             // NOTE: We assume `cont_impl` failed before moving `h`
             if (!r) {
-                h(r.error());
+                h(r);
             }
         });
     }
@@ -207,11 +199,7 @@ struct opC {
                     return {};
                 });
             }
-            if (r) {
-                h(r);
-            } else {
-                h(r.error());
-            }
+            h(r);
         });
     }
 };
