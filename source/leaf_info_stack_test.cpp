@@ -95,7 +95,7 @@ template <typename R, typename F> leaf::result<R> leaf_call(F &&f) {
 // opA:
 //          +--asio::post()--+
 //          ^                V
-//      start                cont -+
+//      start                cont1-+
 //                                 V
 //                             call handler
 struct opA {
@@ -123,7 +123,7 @@ struct opA {
 // opB:
 //          +--opA::start()--+    +--opA::start()--+
 //          ^                V    ^                V
-//      start                cont_1                cont_2 -+
+//      start                cont1                 cont3  -+
 //                                                         V
 //                                                     call handler
 struct opB {
@@ -153,8 +153,8 @@ struct opB {
             [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont3\n"; });
             if (r) {
                 r = leaf_call<void>([]() -> leaf::result<void> {
-                    [[maybe_unused]] auto acc =
-                        leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont_2\n"; });
+                    [[maybe_unused]] auto acc4 =
+                        leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont4\n"; });
                     FAILURE_POINT();
                     return {};
                 });
@@ -171,7 +171,7 @@ struct opB {
 // opC:
 //          +--opB::start()--+    +--opB::start()--+
 //          ^                V    ^                V
-//      start                cont_1                cont_2 -+
+//      start                cont1                 cont3  -+
 //                                                         V
 //                                                     call handler
 struct opC {
@@ -201,8 +201,8 @@ struct opC {
             [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont3\n"; });
             if (r) {
                 r = leaf_call<void>([]() -> leaf::result<void> {
-                    [[maybe_unused]] auto acc =
-                        leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont_2\n"; });
+                    [[maybe_unused]] auto acc4 =
+                        leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont4\n"; });
                     FAILURE_POINT();
                     return {};
                 });
