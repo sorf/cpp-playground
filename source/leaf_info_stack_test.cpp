@@ -128,7 +128,8 @@ struct opB {
         [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::start\n"; });
         FAILURE_POINT();
         opA::start(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            [[maybe_unused]] auto acc1 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont1\n"; });
+            r.accumulate([](e_stack &) { std::cout << "stack: opB::cont1-r\n"; });
+            [[maybe_unused]] auto acc1 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont1-a\n"; });
             if (r) {
                 r = leaf_call<void>([&]() -> leaf::result<void> {
                     cont_impl(io_context, std::move(h));
@@ -146,7 +147,8 @@ struct opB {
         [[maybe_unused]] auto acc2 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont2\n"; });
         FAILURE_POINT();
         opA::start(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont3\n"; });
+            r.accumulate([](e_stack &) { std::cout << "stack: opB::cont3-r\n"; });
+            [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont3-a\n"; });
             if (r) {
                 r = leaf_call<void>([]() -> leaf::result<void> {
                     [[maybe_unused]] auto acc4 =
@@ -172,7 +174,8 @@ struct opC {
         [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::start\n"; });
         FAILURE_POINT();
         opB::start(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            [[maybe_unused]] auto acc1 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont1\n"; });
+            r.accumulate([](e_stack &) { std::cout << "stack: opC::cont1-r\n"; });
+            [[maybe_unused]] auto acc1 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont1-a\n"; });
             if (r) {
                 r = leaf_call<void>([&]() -> leaf::result<void> {
                     cont_impl(io_context, std::move(h));
@@ -190,7 +193,8 @@ struct opC {
         [[maybe_unused]] auto acc2 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont2\n"; });
         FAILURE_POINT();
         opB::start(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont3\n"; });
+            r.accumulate([](e_stack &) { std::cout << "stack: opC::cont3-r\n"; });
+            [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont3-a\n"; });
             if (r) {
                 r = leaf_call<void>([]() -> leaf::result<void> {
                     [[maybe_unused]] auto acc4 =
