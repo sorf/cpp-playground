@@ -64,18 +64,19 @@ auto g_handle_error_impl = [](leaf::verbose_diagnostic_info const &diag, e_stack
     std::cout << "Error: any_stack: " << (e != nullptr ? "YES" : "NO") << ", diagnostic:" << diag << std::endl;
 };
 
-auto g_try_error_handler = [&](leaf::error_in_remote_try_ const &error) {
+auto g_try_error_handler = [](leaf::error_in_remote_try_ const &error) {
     return leaf::handle_error(
         error, [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) { g_handle_error_impl(diag, e); });
 };
 
-auto g_all_error_handler = [&](leaf::error_in_remote_handle_all const &error) {
+auto g_all_error_handler = [](leaf::error_in_remote_handle_all const &error) {
     return leaf::handle_error(
         error,
         [&](std::exception_ptr const &ep, e_stack const *e) {
             leaf::try_([&] { std::rethrow_exception(ep); },
                        [&](leaf::verbose_diagnostic_info const &diag) { g_handle_error_impl(diag, e); });
         },
+        [](leaf::catch_<std::exception> e) { std::cout << "Run-Error: " << e.value().what() << "\n"; },
         [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) { g_handle_error_impl(diag, e); });
 };
 
@@ -215,32 +216,25 @@ int main() {
         while (retry) {
             std::cout << "Run: " << start_count << std::endl;
             set_failure_counter(start_count++);
-            try {
-                asio::io_context io_context;
-                leaf::remote_try_(
-                    [&] {
-                        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: main\n"; });
-                        opC::start(io_context, [&](leaf::result<void> r) -> leaf::result<void> {
-                            leaf::remote_handle_all(
-                                [&]() -> leaf::result<void> {
-                                    // NOLINTNEXTLINE
-                                    LEAF_CHECK(r);
-                                    std::cout << "Success" << std::endl;
-                                    retry = false;
-                                    return {};
-                                },
-                                [&](leaf::error_in_remote_handle_all const &error) {
-                                    return g_all_error_handler(error);
-                                });
-                            return {};
-                        });
-                    },
-                    [&](leaf::error_in_remote_try_ const &error) { return g_try_error_handler(error); });
-
-                io_context.run();
-            } catch (std::exception const &e) {
-                std::cout << "Run-Error: " << e.what() << "\n";
-            }
+            leaf::remote_try_(
+                [&] {
+                    asio::io_context io_context;
+                    [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: main\n"; });
+                    opC::start(io_context, [&](leaf::result<void> r) -> leaf::result<void> {
+                        leaf::remote_handle_all(
+                            [&]() -> leaf::result<void> {
+                                // NOLINTNEXTLINE
+                                LEAF_CHECK(r);
+                                std::cout << "Success" << std::endl;
+                                retry = false;
+                                return {};
+                            },
+                            [&](leaf::error_in_remote_handle_all const &error) { return g_all_error_handler(error); });
+                        return {};
+                    });
+                    io_context.run();
+                },
+                [&](leaf::error_in_remote_try_ const &error) { return g_try_error_handler(error); });
         }
     } catch (std::exception const &e) {
         std::cout << "Error: " << e.what() << "\n";
