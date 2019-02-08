@@ -73,9 +73,14 @@ template <typename Result> inline void append_estack(Result &r, std::string_view
 // Calls a function under `leaf::capture_in_result` and `leaf::exception_to_result`.
 template <typename ErrorHandler, typename R, typename F> leaf::result<R> leaf_call(F &&f) {
     using result_type = leaf::result<R>;
+#ifndef __clang_analyzer__
     return leaf::capture_in_result<ErrorHandler>([f = std::forward<F>(f)]() mutable -> result_type {
         return leaf::exception_to_result([&]() -> result_type { return f(); });
     });
+#else
+    [[maybe_unused]] F fm =  std::forward<F>(f);
+    return result_type();
+#endif
 }
 
 #define APPEND_ESTACK(info)                                                                                            \
