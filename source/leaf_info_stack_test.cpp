@@ -88,22 +88,22 @@ template <typename ErrorHandler, typename R, typename F> leaf::result<R> leaf_ca
 // Operations
 // ----------
 
-// opA:
+// op_a:
 //          +--asio::post()--+
 //          ^                V
 //      start                cont1-+
 //                                 V
 //                             call handler
-struct opA {
+struct op_a {
 
     template <typename ErrorHandler, typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        APPEND_ESTACK("opA::start");
+        APPEND_ESTACK("op_a::start");
         FAILURE_POINT();
         asio::post(io_context, [h = std::forward<Handler>(h)]() mutable {
-            APPEND_ESTACK("opA::cont1");
+            APPEND_ESTACK("op_a::cont1");
 
             auto r = leaf_call<ErrorHandler, void>([]() -> leaf::result<void> {
-                APPEND_ESTACK("opA::cont2");
+                APPEND_ESTACK("op_a::cont2");
                 FAILURE_POINT();
                 return {};
             });
@@ -112,19 +112,19 @@ struct opA {
     }
 };
 
-// opB:
-//          +--opA::start()--+    +--opA::start()--+
+// op_b:
+//          +--op_a::start()--+    +--op_a::start()--+
 //          ^                V    ^                V
 //      start                cont1                 cont3  -+
 //                                                         V
 //                                                     call handler
-struct opB {
+struct op_b {
 
     template <typename ErrorHandler, typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        APPEND_ESTACK("opB::start");
+        APPEND_ESTACK("op_b::start");
         FAILURE_POINT();
-        opA::start<ErrorHandler>(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            APPEND_ESTACK_R(r, "opB::cont1");
+        op_a::start<ErrorHandler>(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
+            APPEND_ESTACK_R(r, "op_b::cont1");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([&]() -> leaf::result<void> {
                     cont_impl<ErrorHandler>(io_context, std::move(h));
@@ -140,13 +140,13 @@ struct opB {
 
     template <typename ErrorHandler, typename Handler>
     static void cont_impl(asio::io_context &io_context, Handler &&h) {
-        APPEND_ESTACK("opB::cont2");
+        APPEND_ESTACK("op_b::cont2");
         FAILURE_POINT();
-        opA::start<ErrorHandler>(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            APPEND_ESTACK_R(r, "opB::cont3");
+        op_a::start<ErrorHandler>(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
+            APPEND_ESTACK_R(r, "op_b::cont3");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([]() -> leaf::result<void> {
-                    APPEND_ESTACK("opB::cont4");
+                    APPEND_ESTACK("op_b::cont4");
                     FAILURE_POINT();
                     return {};
                 });
@@ -156,19 +156,19 @@ struct opB {
     }
 };
 
-// opC:
-//          +--opB::start()--+    +--opB::start()--+
+// op_c:
+//          +--op_b::start()--+    +--op_b::start()--+
 //          ^                V    ^                V
 //      start                cont1                 cont3  -+
 //                                                         V
 //                                                     call handler
-struct opC {
+struct op_c {
 
     template <typename ErrorHandler, typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        APPEND_ESTACK("opC::start");
+        APPEND_ESTACK("op_c::start");
         FAILURE_POINT();
-        opB::start<ErrorHandler>(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            APPEND_ESTACK_R(r, "opC::cont1");
+        op_b::start<ErrorHandler>(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
+            APPEND_ESTACK_R(r, "op_c::cont1");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([&]() -> leaf::result<void> {
                     cont_impl<ErrorHandler>(io_context, std::move(h));
@@ -184,13 +184,13 @@ struct opC {
 
     template <typename ErrorHandler, typename Handler>
     static void cont_impl(asio::io_context &io_context, Handler &&h) {
-        APPEND_ESTACK("opC::cont2");
+        APPEND_ESTACK("op_c::cont2");
         FAILURE_POINT();
-        opB::start<ErrorHandler>(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            APPEND_ESTACK_R(r, "opC::cont3");
+        op_b::start<ErrorHandler>(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
+            APPEND_ESTACK_R(r, "op_c::cont3");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([]() -> leaf::result<void> {
-                    APPEND_ESTACK("opC::cont4");
+                    APPEND_ESTACK("op_c::cont4");
                     FAILURE_POINT();
                     return {};
                 });
@@ -229,7 +229,7 @@ int main() {
                 [&] {
                     asio::io_context io_context;
                     APPEND_ESTACK("::main-d");
-                    opC::start<decltype(error_handler)>(io_context, [&](leaf::result<void> r) -> leaf::result<void> {
+                    op_c::start<decltype(error_handler)>(io_context, [&](leaf::result<void> r) -> leaf::result<void> {
                         leaf::remote_handle_all(
                             [&]() -> leaf::result<void> {
                                 APPEND_ESTACK_R(r, "::main-r");
