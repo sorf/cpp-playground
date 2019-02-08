@@ -1,4 +1,5 @@
 #include <boost/leaf/all.hpp>
+#include <boost/log/utility/unique_identifier_name.hpp>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -60,6 +61,15 @@ struct e_stack {
     std::nullptr_t value;
 };
 
+inline decltype(auto) append_estack(std::string_view info, unsigned line) {
+    return leaf::accumulate(
+        [=](e_stack &) { std::cout << "stack\t<direct>\t" << info << "\t@line\t" << line << std::endl; });
+}
+
+template <typename Result> inline void append_estack(Result &r, std::string_view info, unsigned line) {
+    r.accumulate([=](e_stack &) { std::cout << "stack\t<reversed>\t" << info << "\t@line\t" << line << std::endl; });
+}
+
 // Calls a function under `leaf::capture_in_result` and `leaf::exception_to_result`.
 template <typename ErrorHandler, typename R, typename F> leaf::result<R> leaf_call(F &&f) {
     using result_type = leaf::result<R>;
@@ -67,6 +77,13 @@ template <typename ErrorHandler, typename R, typename F> leaf::result<R> leaf_ca
         return leaf::exception_to_result([&]() -> result_type { return f(); });
     });
 }
+
+#define APPEND_ESTACK(info)                                                                                            \
+    [[maybe_unused]] auto BOOST_LOG_UNIQUE_IDENTIFIER_NAME(append_estack_0_guard) = ::append_estack(info, __LINE__)
+
+#define APPEND_ESTACK_R(r, info)                                                                                       \
+    [[maybe_unused]] auto BOOST_LOG_UNIQUE_IDENTIFIER_NAME(append_estack_1_guard) = ::append_estack(info, __LINE__);   \
+    ::append_estack(r, info, __LINE__)
 
 // Operations
 // ----------
@@ -80,13 +97,13 @@ template <typename ErrorHandler, typename R, typename F> leaf::result<R> leaf_ca
 struct opA {
 
     template <typename ErrorHandler, typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opA::start\n"; });
+        APPEND_ESTACK("opA::start");
         FAILURE_POINT();
         asio::post(io_context, [h = std::forward<Handler>(h)]() mutable {
-            [[maybe_unused]] auto acc1 = leaf::accumulate([](e_stack &) { std::cout << "stack: opA::cont1\n"; });
+            APPEND_ESTACK("opA::cont1");
 
             auto r = leaf_call<ErrorHandler, void>([]() -> leaf::result<void> {
-                [[maybe_unused]] auto acc2 = leaf::accumulate([](e_stack &) { std::cout << "stack: opA::cont2\n"; });
+                APPEND_ESTACK("opA::cont2");
                 FAILURE_POINT();
                 return {};
             });
@@ -104,11 +121,10 @@ struct opA {
 struct opB {
 
     template <typename ErrorHandler, typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::start\n"; });
+        APPEND_ESTACK("opB::start");
         FAILURE_POINT();
         opA::start<ErrorHandler>(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            r.accumulate([](e_stack &) { std::cout << "stack: opB::cont1-r\n"; });
-            [[maybe_unused]] auto acc1 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont1-a\n"; });
+            APPEND_ESTACK_R(r, "opB::cont1");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([&]() -> leaf::result<void> {
                     cont_impl<ErrorHandler>(io_context, std::move(h));
@@ -124,15 +140,13 @@ struct opB {
 
     template <typename ErrorHandler, typename Handler>
     static void cont_impl(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc2 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont2\n"; });
+        APPEND_ESTACK("opB::cont2");
         FAILURE_POINT();
         opA::start<ErrorHandler>(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            r.accumulate([](e_stack &) { std::cout << "stack: opB::cont3-r\n"; });
-            [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont3-a\n"; });
+            APPEND_ESTACK_R(r, "opB::cont3");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([]() -> leaf::result<void> {
-                    [[maybe_unused]] auto acc4 =
-                        leaf::accumulate([](e_stack &) { std::cout << "stack: opB::cont4\n"; });
+                    APPEND_ESTACK("opB::cont4");
                     FAILURE_POINT();
                     return {};
                 });
@@ -151,11 +165,10 @@ struct opB {
 struct opC {
 
     template <typename ErrorHandler, typename Handler> static void start(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::start\n"; });
+        APPEND_ESTACK("opC::start");
         FAILURE_POINT();
         opB::start<ErrorHandler>(io_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            r.accumulate([](e_stack &) { std::cout << "stack: opC::cont1-r\n"; });
-            [[maybe_unused]] auto acc1 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont1-a\n"; });
+            APPEND_ESTACK_R(r, "opC::cont1");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([&]() -> leaf::result<void> {
                     cont_impl<ErrorHandler>(io_context, std::move(h));
@@ -171,15 +184,13 @@ struct opC {
 
     template <typename ErrorHandler, typename Handler>
     static void cont_impl(asio::io_context &io_context, Handler &&h) {
-        [[maybe_unused]] auto acc2 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont2\n"; });
+        APPEND_ESTACK("opC::cont2");
         FAILURE_POINT();
         opB::start<ErrorHandler>(io_context, [h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
-            r.accumulate([](e_stack &) { std::cout << "stack: opC::cont3-r\n"; });
-            [[maybe_unused]] auto acc3 = leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont3-a\n"; });
+            APPEND_ESTACK_R(r, "opC::cont3");
             if (r) {
                 r = leaf_call<ErrorHandler, void>([]() -> leaf::result<void> {
-                    [[maybe_unused]] auto acc4 =
-                        leaf::accumulate([](e_stack &) { std::cout << "stack: opC::cont4\n"; });
+                    APPEND_ESTACK("opC::cont4");
                     FAILURE_POINT();
                     return {};
                 });
@@ -212,15 +223,16 @@ int main() {
         bool retry = true;
         std::size_t start_count = 1;
         while (retry) {
-            std::cout << "Run: " << start_count << std::endl;
+            std::cout << "\n\n----\nRun: " << start_count << std::endl;
             set_failure_counter(start_count++);
             leaf::remote_try_(
                 [&] {
                     asio::io_context io_context;
-                    [[maybe_unused]] auto acc = leaf::accumulate([](e_stack &) { std::cout << "stack: main\n"; });
+                    APPEND_ESTACK("::main-d");
                     opC::start<decltype(error_handler)>(io_context, [&](leaf::result<void> r) -> leaf::result<void> {
                         leaf::remote_handle_all(
                             [&]() -> leaf::result<void> {
+                                APPEND_ESTACK_R(r, "::main-r");
                                 // NOLINTNEXTLINE
                                 LEAF_CHECK(r);
                                 std::cout << "Success" << std::endl;
