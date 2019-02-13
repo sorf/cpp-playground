@@ -41,7 +41,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
 
         internal_op(asio::io_context &io_context, std::chrono::steady_clock::duration run_duration,
                     handler_type &&handler)
-            : base_type{io_context.get_executor(), std::move(handler)}, data{beast::allocate_stable<state_data>(
+            : base_type{std::move(handler), io_context.get_executor()}, data{beast::allocate_stable<state_data>(
                                                                             *this, io_context, run_duration)} {
             start_one_wait();
         }
