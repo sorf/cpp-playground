@@ -4,6 +4,7 @@
 #include <future>
 #include <iostream>
 #include <list>
+#include <string_view>
 
 // Asio run loop
 // -------------
@@ -73,9 +74,10 @@ template <typename Result> inline void append_estack(Result &r, std::string_view
 // Calls a function under `leaf::capture_in_result` and `leaf::exception_to_result`.
 template <typename ErrorHandler, typename R, typename F> leaf::result<R> leaf_call(F &&f) {
     using result_type = leaf::result<R>;
-    return leaf::capture(leaf::make_shared_context<ErrorHandler>(), [f = std::forward<F>(f)]() mutable -> result_type {
-        return leaf::exception_to_result([&]() -> result_type { return f(); });
-    });
+    return leaf::capture(leaf::make_shared_context<std::decay_t<ErrorHandler>>(),
+                         [f = std::forward<F>(f)]() mutable -> result_type {
+                             return leaf::exception_to_result([&]() -> result_type { return f(); });
+                         });
 }
 
 #define APPEND_ESTACK(info)                                                                                            \
@@ -200,17 +202,37 @@ struct op_c {
     }
 };
 
+template <class TryBlock, class RemoteH>
+typename std::decay<decltype(std::declval<TryBlock>()())>::type leaf_remote_try_catch_no_lint(TryBlock &&try_block,
+                                                                                              RemoteH &&h) {
+#ifndef __clang_analyzer__
+    return leaf::remote_try_catch(std::forward<TryBlock>(try_block), std::forward<RemoteH>(h));
+#else
+    (void)h;
+    return try_block();
+#endif
+}
+
 int main() {
     try {
 
-        auto handle_error_impl = [](leaf::verbose_diagnostic_info const &diag, e_stack const *e) {
+        auto handle_error_impl = [&](leaf::verbose_diagnostic_info const &diag,
+                                     e_stack const *e) -> leaf::result<void> {
             std::cout << "Error: any_stack: " << (e != nullptr ? "YES" : "NO") << ", diagnostic:" << diag << std::endl;
+            return {};
         };
 
         auto error_handler = [&](leaf::error_info const &error) {
-            return leaf::remote_catch(error, [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) {
-                handle_error_impl(diag, e);
-            });
+            return leaf::remote_catch(
+                error,
+                [&](std::exception_ptr const &ep, e_stack const *e) {
+                    return leaf::try_catch(
+                        [&]() -> leaf::result<void> { std::rethrow_exception(ep); },
+                        [&](leaf::verbose_diagnostic_info const &diag) { return handle_error_impl(diag, e); });
+                },
+                [&](leaf::verbose_diagnostic_info const &diag, e_stack const *e) {
+                    return handle_error_impl(diag, e);
+                });
         };
 
         bool retry = true;
@@ -218,27 +240,29 @@ int main() {
         while (retry) {
             std::cout << "\n\n----\nRun: " << start_count << std::endl;
             set_failure_counter(start_count++);
-            leaf::remote_try_catch(
-                [&] {
+            leaf_remote_try_catch_no_lint(
+                [&]() -> leaf::result<void> {
                     asio::io_context io_context;
                     APPEND_ESTACK("::main-d");
                     op_c::start<decltype(error_handler)>(io_context, [&](leaf::result<void> r) {
-                        leaf::remote_try_catch(
-                            [&] {
+                        leaf_remote_try_catch_no_lint(
+                            [&]() -> leaf::result<void> {
                                 APPEND_ESTACK_R(r, "::main-r");
                                 // NOLINTNEXTLINE
                                 LEAF_CHECK(r);
                                 std::cout << "Success" << std::endl;
                                 retry = false;
+                                return {};
                             },
                             [&](leaf::error_info const &error) { return error_handler(error); });
                     });
                     io_context.run();
+                    return {};
                 },
                 [&](leaf::error_info const &error) { return error_handler(error); });
         }
     } catch (std::exception const &e) {
-        std::cout << "Error: " << e.what() << "\n";
+        std::cout << "Fatal Error: " << e.what() << "\n";
     }
     return 0;
 }
