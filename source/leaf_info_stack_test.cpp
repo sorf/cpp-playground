@@ -60,6 +60,13 @@ void failure_point(int line) {
 
 struct e_stack {
     std::list<std::pair<std::string_view, unsigned>> value;
+    friend std::ostream &operator<<(std::ostream &os, e_stack const &s) {
+        os << "e_stack: ";
+        for (auto &i : s.value) {
+            os << '(' << i.first << ',' << i.second << "), ";
+        }
+        return os;
+    }
 };
 
 inline decltype(auto) append_estack(std::string_view info, unsigned line) {
@@ -215,6 +222,28 @@ struct op_c {
     }
 };
 
+template <class TryBlock, class RemoteH>
+typename std::decay<decltype(std::declval<TryBlock>()())>::type leaf_remote_try_catch_no_lint(TryBlock &&try_block,
+                                                                                              RemoteH &&h) {
+#ifndef __clang_analyzer__
+    return leaf::remote_try_catch(std::forward<TryBlock>(try_block), std::forward<RemoteH>(h));
+#else
+    (void)h;
+    return try_block();
+#endif
+}
+
+template <class Context, class R, class RemoteH>
+R leaf_remote_context_handle_some(Context &context, R const &r, RemoteH &&h) {
+#ifndef __clang_analyzer__
+    return context.remote_handle_some(r, std::forward<RemoteH>(h));
+#else
+    (void)context;
+    (void)h;
+    return r;
+#endif
+}
+
 int main() {
     try {
 
@@ -222,16 +251,18 @@ int main() {
                                      e_stack const *e) -> leaf::result<void> {
             std::cout << "Error: \n    any_stack: " << (e != nullptr ? "YES" : "NO");
             if (e != nullptr) {
+                std::cout << "\n";
                 for (auto const &s : e->value) {
                     std::cout << "        " << s.first << "\t@line\t" << s.second << std::endl;
                 }
             }
             std::cout << "    diagnostic:" << diag << std::endl;
+            // throw std::runtime_error("error handling failure");
             return {};
         };
 
         auto error_handler = [&](leaf::error_info const &error) {
-            return leaf::remote_catch(
+            return leaf::remote_handle_some(
                 error,
                 [&](std::exception_ptr const &ep, e_stack const *e) {
                     return leaf::try_catch(
@@ -244,12 +275,12 @@ int main() {
         };
 
         bool retry = true;
-        std::size_t start_count = 5;
+        std::size_t start_count = 1;
         while (retry) {
-            retry = false;
-            std::cout << "\n\n----\nRun: " << start_count << std::endl;
+            std::cout << "\n----\nRun: " << start_count << std::endl;
             set_failure_counter(start_count++);
-            leaf::remote_try_catch(
+
+            leaf_remote_try_catch_no_lint(
                 [&]() -> leaf::result<void> {
                     asio::io_context io_context;
                     auto error_context = leaf::make_context(&error_handler);
@@ -259,16 +290,14 @@ int main() {
                         leaf::context_activator active_context(
                             error_context, leaf::context_activator::on_deactivation::do_not_propagate);
 
-                        leaf::remote_try_catch(
-                            [&]() -> leaf::result<void> {
-                                APPEND_ESTACK_R(r, "::main-r");
-                                if (r) {
-                                    std::cout << "Success" << std::endl;
-                                    retry = false;
-                                }
-                                return r;
-                            },
-                            [&](leaf::error_info const &error) { return error_handler(error); });
+                        APPEND_ESTACK_R(r, "::main-r");
+                        if (r) {
+                            std::cout << "Success" << std::endl;
+                            retry = false;
+                        } else {
+                            [[maybe_unused]] auto rr = leaf_remote_context_handle_some(
+                                error_context, r, [&](leaf::error_info const &error) { return error_handler(error); });
+                        }
                     });
                     io_context.run();
                     return {};
