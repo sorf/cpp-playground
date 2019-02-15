@@ -244,8 +244,9 @@ int main() {
         };
 
         bool retry = true;
-        std::size_t start_count = 1;
+        std::size_t start_count = 5;
         while (retry) {
+            retry = false;
             std::cout << "\n\n----\nRun: " << start_count << std::endl;
             set_failure_counter(start_count++);
             leaf::remote_try_catch(
