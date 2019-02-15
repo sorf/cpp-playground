@@ -257,6 +257,8 @@ int main() {
                 }
             }
             std::cout << "    diagnostic:" << diag << std::endl;
+            // Note: This cannot be enabled yet as the LEAF context.remote_handle_some() calling this error handling
+            // functionality is marked as `noexcept`.
             // throw std::runtime_error("error handling failure");
             return {};
         };
