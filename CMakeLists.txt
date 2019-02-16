@@ -34,6 +34,7 @@ set(TESTS
     asio_composed_one_flow; asio_composed_one_flow_async_op; asio_composed_one_flow_compose;
     asio_composed;
     asio_echo_server;
+    leaf_context_activate_test;
     leaf_info_stack_test;
     )
 foreach(test_name ${TESTS})
@@ -42,6 +43,7 @@ endforeach(test_name)
 
 target_include_directories(asio_composed_one_flow_async_op SYSTEM PRIVATE tmp/include)
 target_include_directories(asio_composed_one_flow_compose SYSTEM PRIVATE tmp/include)
+target_include_directories(leaf_context_activate_test SYSTEM PRIVATE tmp/include)
 target_include_directories(leaf_info_stack_test SYSTEM PRIVATE tmp/include)
 
 

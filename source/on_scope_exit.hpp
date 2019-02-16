@@ -29,6 +29,8 @@ template <typename F> struct [[nodiscard]] scope_exit {
         }
     }
 
+    void clear() noexcept { m_f.reset(); }
+
   private:
     std::optional<F> m_f;
 };
