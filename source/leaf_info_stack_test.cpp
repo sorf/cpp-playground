@@ -223,10 +223,10 @@ struct op_c {
 };
 
 template <class TryBlock, class RemoteH>
-typename std::decay<decltype(std::declval<TryBlock>()())>::type leaf_remote_try_catch_no_lint(TryBlock &&try_block,
-                                                                                              RemoteH &&h) {
+typename std::decay<decltype(std::declval<TryBlock>()())>::type
+leaf_remote_try_handle_some_no_lint(TryBlock &&try_block, RemoteH &&h) {
 #ifndef __clang_analyzer__
-    return leaf::remote_try_catch(std::forward<TryBlock>(try_block), std::forward<RemoteH>(h));
+    return leaf::remote_try_handle_some(std::forward<TryBlock>(try_block), std::forward<RemoteH>(h));
 #else
     (void)h;
     return try_block();
@@ -267,7 +267,7 @@ int main() {
             return leaf::remote_handle_some(
                 error,
                 [&](std::exception_ptr const &ep, e_stack const *e) {
-                    return leaf::try_catch(
+                    return leaf::try_handle_some(
                         [&]() -> leaf::result<void> { std::rethrow_exception(ep); },
                         [&](leaf::verbose_diagnostic_info const &diag) { return handle_error_impl(diag, e); });
                 },
@@ -282,7 +282,7 @@ int main() {
             std::cout << "\n----\nRun: " << start_count << std::endl;
             set_failure_counter(start_count++);
 
-            leaf_remote_try_catch_no_lint(
+            leaf_remote_try_handle_some_no_lint(
                 [&]() -> leaf::result<void> {
                     asio::io_context io_context;
                     auto error_context = leaf::make_context(&error_handler);

@@ -5,10 +5,10 @@
 namespace leaf = boost::leaf;
 
 template <class TryBlock, class RemoteH>
-typename std::decay<decltype(std::declval<TryBlock>()())>::type leaf_remote_try_catch_no_lint(TryBlock &&try_block,
-                                                                                              RemoteH &&h) {
+typename std::decay<decltype(std::declval<TryBlock>()())>::type
+leaf_remote_try_handle_some_no_lint(TryBlock &&try_block, RemoteH &&h) {
 #ifndef __clang_analyzer__
-    return leaf::remote_try_catch(std::forward<TryBlock>(try_block), std::forward<RemoteH>(h));
+    return leaf::remote_try_handle_some(std::forward<TryBlock>(try_block), std::forward<RemoteH>(h));
 #else
     (void)h;
     return try_block();
@@ -42,15 +42,16 @@ leaf::result<void> test_f() {
 int main() {
     try {
         auto error_handler = [&](leaf::error_info const &error, unsigned line) {
-            return leaf::remote_handle_some(error, [&](leaf::verbose_diagnostic_info const &diag) {
-                std::cout << "\n-----\nerror handled at line:" << line << "\ndiagnostic" << diag << std::endl;
-                return leaf::result<void>{};
-            });
+            return leaf::remote_handle_some(
+                error, [&](/*leaf::catch_<std::exception>, */leaf::verbose_diagnostic_info const &diag) {
+                    std::cout << "\n-----\nerror handled at line:" << line << "\ndiagnostic" << diag << std::endl;
+                    return leaf::result<void>{};
+                });
         };
 
         bool retry = true;
         while (retry) {
-            leaf_remote_try_catch_no_lint(
+            leaf_remote_try_handle_some_no_lint(
                 [&]() -> leaf::result<void> {
                     auto error_context = leaf::make_context(&error_handler);
                     error_context.activate();
