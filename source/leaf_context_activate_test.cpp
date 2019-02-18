@@ -43,7 +43,12 @@ int main() {
     try {
         auto error_handler = [&](leaf::error_info const &error, unsigned line) {
             return leaf::remote_handle_some(
-                error, [&](/*leaf::catch_<std::exception>, */leaf::verbose_diagnostic_info const &diag) {
+                error,
+                [&](leaf::verbose_diagnostic_info const &diag) {
+                    std::cout << "\n-----\nerror handled at line:" << line << "\ndiagnostic" << diag << std::endl;
+                    return leaf::result<void>{};
+                },
+                [&](leaf::catch_<std::exception>, leaf::verbose_diagnostic_info const &diag) {
                     std::cout << "\n-----\nerror handled at line:" << line << "\ndiagnostic" << diag << std::endl;
                     return leaf::result<void>{};
                 });
