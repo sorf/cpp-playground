@@ -64,7 +64,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
                 std::cout << boost::format("internal_op[waits=%d]: Error: %s:%s") % data.waits % ec % ec.message()
                           << std::endl;
             }
-            this->invoke(ec);
+            this->invoke_now(ec);
         }
     };
 

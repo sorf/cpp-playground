@@ -102,8 +102,7 @@ struct op_a {
         asio::post(io_context, [&, h = std::forward<Handler>(h)]() mutable {
             leaf::result<void> r;
             {
-                leaf::context_activator active_context(error_context,
-                                                       leaf::context_activator::on_deactivation::do_not_propagate);
+                leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
                 APPEND_ESTACK("op_a::cont1");
                 r = leaf::exception_to_result([&]() -> leaf::result<void> {
                     APPEND_ESTACK("op_a::cont2");
@@ -130,8 +129,7 @@ struct op_b {
         FAILURE_POINT();
         op_a::start(io_context, error_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
             {
-                leaf::context_activator active_context(error_context,
-                                                       leaf::context_activator::on_deactivation::do_not_propagate);
+                leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
                 APPEND_ESTACK_R(r, "op_b::cont1");
                 if (r) {
                     r = leaf::exception_to_result([&]() -> leaf::result<void> {
@@ -153,8 +151,7 @@ struct op_b {
         FAILURE_POINT();
         op_a::start(io_context, error_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
             {
-                leaf::context_activator active_context(error_context,
-                                                       leaf::context_activator::on_deactivation::do_not_propagate);
+                leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
                 APPEND_ESTACK_R(r, "op_b::cont3");
                 if (r) {
                     r = leaf::exception_to_result([&]() -> leaf::result<void> {
@@ -183,8 +180,7 @@ struct op_c {
         FAILURE_POINT();
         op_b::start(io_context, error_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
             {
-                leaf::context_activator active_context(error_context,
-                                                       leaf::context_activator::on_deactivation::do_not_propagate);
+                leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
                 APPEND_ESTACK_R(r, "op_c::cont1");
                 if (r) {
                     r = leaf::exception_to_result([&]() -> leaf::result<void> {
@@ -206,8 +202,7 @@ struct op_c {
         FAILURE_POINT();
         op_b::start(io_context, error_context, [&, h = std::forward<Handler>(h)](leaf::result<void> r) mutable {
             {
-                leaf::context_activator active_context(error_context,
-                                                       leaf::context_activator::on_deactivation::do_not_propagate);
+                leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
                 APPEND_ESTACK_R(r, "op_c::cont3");
                 if (r) {
                     r = leaf::exception_to_result([&]() -> leaf::result<void> {
@@ -292,8 +287,7 @@ int main() {
 
                     APPEND_ESTACK("::main-d");
                     op_c::start(io_context, error_context, [&](leaf::result<void> r) {
-                        leaf::context_activator active_context(
-                            error_context, leaf::context_activator::on_deactivation::do_not_propagate);
+                        leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
 
                         APPEND_ESTACK_R(r, "::main-r");
                         if (r) {
