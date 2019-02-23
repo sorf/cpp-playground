@@ -480,8 +480,7 @@ void run_server(Acceptor &acceptor, std::size_t server_thread_count, std::vector
     // The handler allocator shouldn't be used once the completion handler was called.
     BOOST_ASSERT(handler_memory.use_count() == 0);
 
-    // Let the worker threads run out of work.
-    threads_io_work.reset();
+    // As we exit the scope, `threads_io_work` will be destructed and the worker threads will run out of work.
 }
 
 // Runs test clients connecting to the server
