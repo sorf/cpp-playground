@@ -63,14 +63,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicBuffer &buffer, CompletionToken 
 
         void operator()(error_code ec, std::size_t bytes_transferred = 0) {
             if (!ec) {
-                if (m_write_size) {
-                    assert(*m_write_size == bytes_transferred);
-                    // We completed a write operation, consume the buffer we have just sent.
-                    m_buffer.consume(*m_write_size);
-                    // And start reading a new message.
-                    m_write_size.reset();
-                    return start_read_some();
-                } else {
+                if (!m_write_size) {
                     // We read something.
                     m_buffer.commit(bytes_transferred);
                     std::size_t pos_nl = find_newline(m_buffer.data());
@@ -83,6 +76,13 @@ auto async_demo_rpc(AsyncStream &stream, DynamicBuffer &buffer, CompletionToken 
                         return net::async_write(m_stream, beast::buffers_prefix(pos_nl, m_buffer.data()),
                                                 std::move(*this));
                     }
+                } else {
+                    assert(*m_write_size == bytes_transferred);
+                    // We completed a write operation, consume the buffer we have just sent.
+                    m_buffer.consume(*m_write_size);
+                    // And start reading a new message.
+                    m_write_size.reset();
+                    return start_read_some();
                 }
             }
             // Operation complete here.
