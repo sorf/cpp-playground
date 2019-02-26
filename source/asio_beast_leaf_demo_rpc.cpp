@@ -6,9 +6,13 @@
 #include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core/async_op_base.hpp>
+#include <boost/beast/core/buffer_size.hpp>
 #include <boost/beast/core/buffers_prefix.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/core/make_printable.hpp>
 #include <boost/beast/core/stream_traits.hpp>
+#include <boost/format.hpp>
+#include <boost/predef.h>
 #include <iostream>
 #include <optional>
 #include <thread>
@@ -36,54 +40,78 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 // It is based on:
 // https://github.com/boostorg/beast/blob/c82237512a95487fd67a4287f79f4458ba978f43/example/echo-op/echo_op.cpp
 // https://github.com/chriskohlhoff/asio/blob/e7b397142ae11545ea08fcf04db3008f588b4ce7/asio/src/examples/cpp11/operations/composed_5.cpp
-template <class AsyncStream, class DynamicBuffer, typename CompletionToken>
-auto async_demo_rpc(AsyncStream &stream, DynamicBuffer &buffer, CompletionToken &&token) ->
+template <class AsyncStream, class DynamicReadBuffer, class DynamicWriteBuffer, typename CompletionToken>
+auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
+                    CompletionToken &&token) ->
     typename net::async_result<typename std::decay<CompletionToken>::type, void(error_code)>::return_type {
 
     static_assert(beast::is_async_stream<AsyncStream>::value, "AsyncStream requirements not met");
-    static_assert(net::is_dynamic_buffer<DynamicBuffer>::value, "DynamicBuffer type requirements not met");
+    static_assert(net::is_dynamic_buffer<DynamicReadBuffer>::value, "DynamicBuffer type requirements not met");
+    static_assert(net::is_dynamic_buffer<DynamicWriteBuffer>::value, "DynamicBuffer type requirements not met");
 
     using handler_type = typename net::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
     using base_type = beast::async_op_base<handler_type, beast::executor_type<AsyncStream>>;
     struct internal_op : base_type {
         AsyncStream &m_stream;
-        DynamicBuffer &m_buffer;
-        std::optional<std::size_t> m_write_size;
+        DynamicReadBuffer &m_read_buffer;
+        DynamicWriteBuffer &m_write_buffer;
 
-        internal_op(AsyncStream &stream, DynamicBuffer &buffer, handler_type &&handler)
-            : base_type{std::move(handler), stream.get_executor()}, m_stream(stream), m_buffer(buffer) {
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-local-typedefs"
+#endif
+        using read_buffers_type = typename DynamicReadBuffer::const_buffers_type;
+        using read_buffers_iterator = net::buffers_iterator<read_buffers_type>;
+
+        using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
+        using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
+
+#if BOOST_COMP_CLANG
+#pragma clang diagnostic pop
+#endif
+
+        internal_op(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
+                    handler_type &&handler)
+            : base_type{std::move(handler), stream.get_executor()}, m_stream(stream), m_read_buffer(read_buffer),
+              m_write_buffer(write_buffer) {
             start_read_some();
         }
 
         void start_read_some() {
             std::size_t bytes_to_read = 3; // A small value for testing purposes
                                            // (multiple `operator()` calls for most messages)
-            m_stream.async_read_some(m_buffer.prepare(bytes_to_read), std::move(*this));
+            m_stream.async_read_some(m_read_buffer.prepare(bytes_to_read), std::move(*this));
         }
 
         void operator()(error_code ec, std::size_t bytes_transferred = 0) {
             if (!ec) {
-                if (!m_write_size) {
+                if (m_write_buffer.size() == 0) {
                     // We read something.
-                    m_buffer.commit(bytes_transferred);
-                    std::size_t pos_nl = find_newline(m_buffer.data());
+                    m_read_buffer.commit(bytes_transferred);
+                    std::size_t pos_nl = find_newline(m_read_buffer.data());
                     if (pos_nl == 0) {
                         // Read some more until we get a newline
                         return start_read_some();
-                    } else {
-                        // Write back the line we received.
-                        m_write_size = pos_nl;
-                        return net::async_write(m_stream, beast::buffers_prefix(pos_nl, m_buffer.data()),
-                                                std::move(*this));
                     }
-                } else {
-                    assert(*m_write_size == bytes_transferred);
-                    // We completed a write operation, consume the buffer we have just sent.
-                    m_buffer.consume(*m_write_size);
-                    // And start reading a new message.
-                    m_write_size.reset();
-                    return start_read_some();
+
+                    // Process the line we received.
+                    auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
+                    auto response = process_line(line);
+                    m_read_buffer.consume(pos_nl);
+
+                    // Prepare the response buffer
+                    std::size_t write_size = response.size();
+                    auto response_buffers = m_write_buffer.prepare(write_size);
+                    std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
+                    m_write_buffer.commit(write_size);
+                    return net::async_write(m_stream, response_buffers, std::move(*this));
                 }
+
+                // If getting here, we completed a write operation.
+                assert(m_write_buffer.size() == bytes_transferred);
+                m_write_buffer.consume(bytes_transferred);
+                // And start reading a new message.
+                return start_read_some();
             }
             // Operation complete here.
             this->invoke_now(ec);
@@ -91,20 +119,23 @@ auto async_demo_rpc(AsyncStream &stream, DynamicBuffer &buffer, CompletionToken 
 
         // Same as:
         // https://github.com/boostorg/beast/blob/c82237512a95487fd67a4287f79f4458ba978f43/example/echo-op/echo_op.cpp#L199
-        using const_buffers_type = typename DynamicBuffer::const_buffers_type;
-        static std::size_t find_newline(const_buffers_type const &buffers) {
-            auto begin = net::buffers_iterator<const_buffers_type>::begin(buffers);
-            auto end = net::buffers_iterator<const_buffers_type>::end(buffers);
+        static std::size_t find_newline(read_buffers_type const &buffers) {
+            auto begin = read_buffers_iterator::begin(buffers);
+            auto end = read_buffers_iterator::end(buffers);
             auto result = std::find(begin, end, '\n');
             if (result == end) {
                 return 0;
             }
             return result + 1 - begin;
         }
+
+        static std::string process_line(beast::buffers_prefix_view<read_buffers_type> const &line) {
+            return boost::str(boost::format("%1%: %2%") % beast::buffer_size(line) % beast::make_printable(line));
+        }
     };
 
     typename net::async_completion<CompletionToken, void(error_code)> init(token);
-    internal_op op{stream, buffer, std::move(init.completion_handler)};
+    internal_op op{stream, read_buffer, write_buffer, std::move(init.completion_handler)};
     return init.result.get();
 }
 
@@ -113,13 +144,13 @@ auto async_demo_rpc(AsyncStream &stream, DynamicBuffer &buffer, CompletionToken 
 int main(int argc, char **argv) {
     try {
         if (argc != 3) {
-            std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;
-            std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;    // NOLINT
+            std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl; // NOLINT
             return -1;
         }
 
-        auto const address{net::ip::make_address(argv[1])};
-        auto const port{static_cast<std::uint16_t>(std::strtol(argv[2], nullptr, 0))};
+        auto const address{net::ip::make_address(argv[1])};                            // NOLINT
+        auto const port{static_cast<std::uint16_t>(std::strtol(argv[2], nullptr, 0))}; // NOLINT
         net::ip::tcp::endpoint const endpoint{address, port};
 
         net::io_context io_context;
@@ -142,12 +173,17 @@ int main(int argc, char **argv) {
         // Start the server acceptor and wait for a client.
         std::cout << "Server: Starting on: " << endpoint << std::endl;
         net::ip::tcp::acceptor acceptor{io_context, endpoint};
+#ifndef __clang_analyzer__
         auto socket = acceptor.accept();
+#else
+        net::ip::tcp::socket socket{io_context};
+#endif
         std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
 
         // Start the `async_demo_rpc` operation and wait for its completion.
-        beast::flat_buffer buffer;
-        std::future<void> f = async_demo_rpc(socket, buffer, net::use_future);
+        beast::flat_buffer read_buffer;
+        beast::flat_buffer write_buffer;
+        std::future<void> f = async_demo_rpc(socket, read_buffer, write_buffer, net::use_future);
         try {
             f.get();
             std::cout << "Server: Client work completed successfully" << std::endl;
