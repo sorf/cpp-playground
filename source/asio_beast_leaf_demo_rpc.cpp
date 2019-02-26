@@ -1,3 +1,5 @@
+#include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/trim_all.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/buffers_iterator.hpp>
@@ -6,12 +8,10 @@
 #include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core/async_op_base.hpp>
-#include <boost/beast/core/buffer_size.hpp>
 #include <boost/beast/core/buffers_prefix.hpp>
+#include <boost/beast/core/buffers_to_string.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
-#include <boost/beast/core/make_printable.hpp>
 #include <boost/beast/core/stream_traits.hpp>
-#include <boost/format.hpp>
 #include <boost/predef.h>
 #include <iostream>
 #include <optional>
@@ -130,7 +130,18 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         }
 
         static std::string process_line(beast::buffers_prefix_view<read_buffers_type> const &line) {
-            return boost::str(boost::format("%1%: %2%") % beast::buffer_size(line) % beast::make_printable(line));
+            // Converting the input line to a string for simplified processing.
+            std::string line_str = beast::buffers_to_string(line);
+            boost::algorithm::trim_all(line_str);
+            std::vector<std::string> line_words;
+            boost::algorithm::split(line_words, line_str, boost::is_any_of("\t \r\n"));
+
+            std::string response = std::to_string(line_words.size()) + ": ";
+            for (auto const &s : line_words) {
+                response += " \"" + s + "\"";
+            }
+            response += "\n";
+            return response;
         }
     };
 
