@@ -13,6 +13,7 @@
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/beast/core/stream_traits.hpp>
 #include <boost/predef.h>
+#include <charconv>
 #include <iostream>
 #include <optional>
 #include <thread>
@@ -96,7 +97,8 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
 
                     // Process the line we received.
                     auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
-                    auto response = process_line(line);
+                    std::string response = process_line(line);
+                    response += "\n";
                     m_read_buffer.consume(pos_nl);
 
                     // Prepare the response buffer
@@ -133,15 +135,58 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
             // Converting the input line to a string for simplified processing.
             std::string line_str = beast::buffers_to_string(line);
             boost::algorithm::trim_all(line_str);
-            std::vector<std::string> line_words;
+            std::deque<std::string> line_words;
             boost::algorithm::split(line_words, line_str, boost::is_any_of("\t \r\n"));
 
-            std::string response = std::to_string(line_words.size()) + ": ";
-            for (auto const &s : line_words) {
-                response += " \"" + s + "\"";
+            static char const *const help = "Help:\n"
+                                            "    sum <integer>...            Addition\n"
+                                            "    sub <integer>...            Substraction\n"
+                                            "    mul <integer>...            Multiplication\n"
+                                            "    div <integer>...            Division\n"
+                                            "    mod <integer> <integer>     Remainder\n"
+                                            "    <anything else>             This message";
+
+            if (line_words.empty()) {
+                return help;
             }
-            response += "\n";
-            return response;
+            std::string command = line_words.front();
+            line_words.pop_front();
+
+            if (command == "sum") {
+                std::size_t sum = 0;
+                for (auto const &w : line_words) {
+                    sum += get_integer(w);
+                }
+                return std::to_string(sum);
+            } else if (command == "sub") {
+                if (line_words.size() < 2) {
+                    return "sub: at least two integers are expected";
+                }
+                std::size_t sub = get_integer(line_words[0]);
+                line_words.pop_front();
+                for (auto const &w : line_words) {
+                    sub -= get_integer(w);
+                }
+                return std::to_string(sub);
+            } else if (command == "mul") {
+                std::size_t mul = 1;
+                for (auto const &w : line_words) {
+                    mul *= get_integer(w);
+                }
+                return std::to_string(mul);
+            } else if (command == "div") {
+                return "todo";
+            } else if (command == "mod") {
+                return "todo";
+            } else {
+                return help;
+            }
+        }
+
+        static long long get_integer(std::string const &word) {
+            long long value = 0;
+            std::from_chars(word.data(), word.data() + word.size(), value, 10);
+            return value;
         }
     };
 
