@@ -45,14 +45,18 @@ template <typename F> struct [[nodiscard]] scope_exit {
 template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
 
 // The location of a int64 parse error.
-struct e_parse_int64_location {
-    std::pair<std::string, std::size_t> value;
+// It refers the range of characters from which the parsing was done.
+template <typename Range> struct e_parse_int64_location {
+    std::pair<Range const, typename boost::range_iterator<Range>::type> value;
+
     friend std::ostream &operator<<(std::ostream &os, e_parse_int64_location const &e) {
-        std::string_view sv(e.value.first);
-        if (e.value.second == 0) {
+        std::string s{boost::begin(e.value.first), boost::end(e.value.first)};
+        std::string_view sv(s);
+        std::size_t pos = std::distance(boost::begin(e.value.first), e.value.second);
+        if (pos == 0) {
             os << "err->" << sv;
-        } else if (e.value.second < sv.size()) {
-            os << sv.substr(0, e.value.second) << " err-> " << sv.substr(e.value.second);
+        } else if (pos < sv.size()) {
+            os << sv.substr(0, pos) << " err-> " << sv.substr(pos);
         } else {
             os << sv << "<-err";
         }
@@ -60,7 +64,7 @@ struct e_parse_int64_location {
     }
 };
 
-// Parses an integer from a (Boost) range of characters.
+// Parses an integer from a range of characters.
 template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &word) {
     [[maybe_unused]] auto const begin = boost::begin(word);
     [[maybe_unused]] auto const end = boost::end(word);
@@ -69,13 +73,14 @@ template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &wo
     auto i = begin;
     bool result = boost::spirit::qi::parse(i, end, boost::spirit::long_long, value);
     if (!result || i != end) {
-        return leaf::new_error(e_parse_int64_location{std::make_pair(std::string{begin, end}, i - begin)});
+        return leaf::new_error(e_parse_int64_location<Range>{std::make_pair(word, i)});
     }
 #endif
     return value;
 }
 
 // The command being executed while we get an error.
+// It refers the range of characters from which the command was extracted.
 template <typename Range> struct e_command { Range value; };
 // The expected number or arguments for the command being executed when we get an error.
 // Some commands may accept a variable number of arguments (e.g. greater than 1 would mean [2, SIZE_MAX]).
@@ -118,17 +123,17 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         words.pop_back();
     }
 
-    static char const *const help = "Help:\r\n"
-                                    "    quit                        End the session\r\n"
-                                    "    sum <int64>*                Addition\r\n"
-                                    "    sub <int64>+                Substraction\r\n"
-                                    "    mul <int64>*                Multiplication\r\n"
-                                    "    div <int64>+                Division\r\n"
-                                    "    mod <int64> <int64>         Remainder\r\n"
-                                    "    <anything else>             This message\r\n";
+    static char const *const help_with_newline = "Help:\r\n"
+                                                 "    quit                        End the session\r\n"
+                                                 "    sum <int64>*                Addition\r\n"
+                                                 "    sub <int64>+                Substraction\r\n"
+                                                 "    mul <int64>*                Multiplication\r\n"
+                                                 "    div <int64>+                Division\r\n"
+                                                 "    mod <int64> <int64>         Remainder\r\n"
+                                                 "    <anything else>             This message\r\n";
 
     if (words.empty()) {
-        return std::make_pair(std::string{help}, false);
+        return std::make_pair(std::string{help_with_newline}, false);
     }
 
     auto command = words.front();
@@ -195,7 +200,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         }
         response = std::to_string(i1 % i2);
     } else {
-        return std::make_pair(std::string{help}, false);
+        return std::make_pair(std::string{help_with_newline}, false);
     }
 
     response += "\r\n";
