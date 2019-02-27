@@ -1,3 +1,4 @@
+// Example of a composed asynchronous operation which uses the LEAF library for error handling and reporting.
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/asio/async_result.hpp>
@@ -43,6 +44,7 @@ template <typename F> struct [[nodiscard]] scope_exit {
 };
 template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
 
+// The location of a int64 parse error.
 struct e_parse_int64_location {
     std::pair<std::string, std::size_t> value;
     friend std::ostream &operator<<(std::ostream &os, e_parse_int64_location const &e) {
@@ -73,8 +75,10 @@ template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &wo
     return value;
 }
 
+// The command being executed while we get an error.
 template <typename Range> struct e_command { Range value; };
-
+// The expected number or arguments for the command being executed when we get an error.
+// Some commands may accept a variable number of arguments (e.g. greater than 1 would mean [2, SIZE_MAX]).
 struct e_expected_arg_count {
     struct range {
         std::size_t min;
@@ -94,7 +98,7 @@ struct e_expected_arg_count {
         return os;
     }
 };
-
+// The actual number of arguments for the command being executed when we get an error.
 struct e_arg_count {
     std::size_t value;
 };
@@ -116,11 +120,11 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
 
     static char const *const help = "Help:\r\n"
                                     "    quit                        End the session\r\n"
-                                    "    sum <integer>*              Addition\r\n"
-                                    "    sub <integer>+              Substraction\r\n"
-                                    "    mul <integer>*              Multiplication\r\n"
-                                    "    div <integer>+              Division\r\n"
-                                    "    mod <integer> <integer>     Remainder\r\n"
+                                    "    sum <int64>*                Addition\r\n"
+                                    "    sub <int64>+                Substraction\r\n"
+                                    "    mul <int64>*                Multiplication\r\n"
+                                    "    div <int64>+                Division\r\n"
+                                    "    mod <int64> <int64>         Remainder\r\n"
                                     "    <anything else>             This message\r\n";
 
     if (words.empty()) {
@@ -198,7 +202,13 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
     return std::make_pair(response, quit);
 }
 
-// A composed that implements a demo server side remote-procedure call.
+// A composed asynchronous operation that implements a basic remote calculator.
+// It receives from the remote side commands such as:
+//      sum 1 2 3
+//      div 3 2
+//      mod 1 0
+// and then sends back the result.
+//
 // It is based on:
 // https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/echo-op/echo_op.cpp#L1
 // https://github.com/chriskohlhoff/asio/blob/e7b397142ae11545ea08fcf04db3008f588b4ce7/asio/src/examples/cpp11/operations/composed_5.cpp
