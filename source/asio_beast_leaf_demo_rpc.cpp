@@ -12,6 +12,7 @@
 #include <boost/beast/core/buffers_to_string.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/beast/core/stream_traits.hpp>
+#include <boost/leaf/all.hpp>
 #include <boost/predef.h>
 #include <boost/spirit/include/qi_numeric.hpp>
 #include <boost/spirit/include/qi_parse.hpp>
@@ -23,6 +24,7 @@
 #include <thread>
 
 namespace beast = boost::beast;
+namespace leaf = boost::leaf;
 namespace net = boost::asio;
 
 namespace {
@@ -41,8 +43,23 @@ template <typename F> struct [[nodiscard]] scope_exit {
 };
 template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
 
+struct e_parse_int64_location {
+    std::pair<std::string, std::size_t> value;
+    friend std::ostream &operator<<(std::ostream &os, e_parse_int64_location const &e) {
+        std::string_view sv(e.value.first);
+        if (e.value.second == 0) {
+            os << "err->" << sv;
+        } else if (e.value.second < sv.size()) {
+            os << sv.substr(0, e.value.second) << " err-> " << sv.substr(e.value.second);
+        } else {
+            os << sv << "<-err";
+        }
+        return os;
+    }
+};
+
 // Parses an integer from a (Boost) range of characters.
-template <typename Range> std::int64_t parse_int64(Range const &word) {
+template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &word) {
     [[maybe_unused]] auto const begin = boost::begin(word);
     [[maybe_unused]] auto const end = boost::end(word);
     std::int64_t value = 0;
@@ -50,15 +67,41 @@ template <typename Range> std::int64_t parse_int64(Range const &word) {
     auto i = begin;
     bool result = boost::spirit::qi::parse(i, end, boost::spirit::long_long, value);
     if (!result || i != end) {
-        throw std::runtime_error("int64 parse error");
+        return leaf::new_error(e_parse_int64_location{std::make_pair(std::string{begin, end}, i - begin)});
     }
 #endif
     return value;
 }
 
+template <typename Range> struct e_command { Range value; };
+
+struct e_expected_arg_count {
+    struct range {
+        std::size_t min;
+        std::size_t max;
+    };
+
+    range value;
+
+    friend std::ostream &operator<<(std::ostream &os, e_expected_arg_count const &e) {
+        if (e.value.min == e.value.max) {
+            os << e.value.min;
+        } else if (e.value.max < SIZE_MAX) {
+            os << "[" << e.value.min << ", " << e.value.max << "]";
+        } else {
+            os << "[" << e.value.min << ", MAX]";
+        }
+        return os;
+    }
+};
+
+struct e_arg_count {
+    std::size_t value;
+};
+
 // Processes a remote command.
 // Returns the response and a flag indicating this is the last command to execute.
-template <typename Range> std::pair<std::string, bool> execute_command(Range const &line) {
+template <typename Range> leaf::result<std::pair<std::string, bool>> execute_command(Range const &line) {
     // Split the command in words.
     // Note that split() doesn't elimintate leading and trailing empty substrings.
     std::list<Range> words; // or std::deque<Range> words;
@@ -73,20 +116,22 @@ template <typename Range> std::pair<std::string, bool> execute_command(Range con
 
     static char const *const help = "Help:\r\n"
                                     "    quit                        End the session\r\n"
-                                    "    sum <integer>...            Addition\r\n"
-                                    "    sub <integer>...            Substraction\r\n"
-                                    "    mul <integer>...            Multiplication\r\n"
-                                    "    div <integer>...            Division\r\n"
+                                    "    sum <integer>*              Addition\r\n"
+                                    "    sub <integer>+              Substraction\r\n"
+                                    "    mul <integer>*              Multiplication\r\n"
+                                    "    div <integer>+              Division\r\n"
                                     "    mod <integer> <integer>     Remainder\r\n"
                                     "    <anything else>             This message\r\n";
 
     if (words.empty()) {
-        return {help, false};
+        return std::make_pair(std::string{help}, false);
     }
 
     auto command = words.front();
     words.pop_front();
 
+    auto load_cmd = leaf::preload(e_command<Range>{command});
+    auto load_arg_count = leaf::preload(e_arg_count{words.size()});
     std::string response;
     bool quit = false;
 
@@ -97,60 +142,56 @@ template <typename Range> std::pair<std::string, bool> execute_command(Range con
     } else if (command == "sum"sv) {
         std::int64_t sum = 0;
         for (auto const &w : words) {
-            auto i = parse_int64(w);
+            LEAF_AUTO(i, parse_int64(w));
             sum += i;
         }
         response = std::to_string(sum);
     } else if (command == "sub"sv) {
         if (words.size() < 2) {
-            response = "sub: at least two integers are expected";
-        } else {
-            auto sub = parse_int64(words.front());
-            words.pop_front();
-            for (auto const &w : words) {
-                auto i = parse_int64(w);
-                sub -= i;
-            }
-            response = std::to_string(sub);
+            return leaf::new_error(e_expected_arg_count{{2, SIZE_MAX}});
         }
+        LEAF_AUTO(sub, parse_int64(words.front()));
+        words.pop_front();
+        for (auto const &w : words) {
+            LEAF_AUTO(i, parse_int64(w));
+            sub -= i;
+        }
+        response = std::to_string(sub);
     } else if (command == "mul"sv) {
         std::int64_t mul = 1;
         for (auto const &w : words) {
-            auto i = parse_int64(w);
+            LEAF_AUTO(i, parse_int64(w));
             mul *= i;
         }
         response = std::to_string(mul);
     } else if (command == "div"sv) {
         if (words.size() < 2) {
-            response = "div: at least two integers are expected";
-        } else {
-            auto div = parse_int64(words.front());
-            words.pop_front();
-            for (auto const &w : words) {
-                auto i = parse_int64(w);
-                if (i == 0) {
-                    return {"div: division by zero\r\n", quit};
-                }
-                div /= i;
-            }
-            response = std::to_string(div);
+            return leaf::new_error(e_expected_arg_count{{2, SIZE_MAX}});
         }
+        LEAF_AUTO(div, parse_int64(words.front()));
+        words.pop_front();
+        for (auto const &w : words) {
+            LEAF_AUTO(i, parse_int64(w));
+            if (i == 0) {
+                throw std::runtime_error{"division by zero"};
+            }
+            div /= i;
+        }
+        response = std::to_string(div);
     } else if (command == "mod"sv) {
         if (words.size() != 2) {
-            response = "mod: exactly two integers are expected";
-        } else {
-            auto i1 = parse_int64(words.front());
-            words.pop_front();
-            auto i2 = parse_int64(words.front());
-            words.pop_front();
-            if (i2 == 0) {
-                response = "mod: division by zero";
-            } else {
-                response = std::to_string(i1 % i2);
-            }
+            return leaf::new_error(e_expected_arg_count{{2, 2}});
         }
+        LEAF_AUTO(i1, parse_int64(words.front()));
+        words.pop_front();
+        LEAF_AUTO(i2, parse_int64(words.front()));
+        words.pop_front();
+        if (i2 == 0) {
+            throw leaf::exception(std::runtime_error{"division by zero"});
+        }
+        response = std::to_string(i1 % i2);
     } else {
-        return {help, false};
+        return std::make_pair(std::string{help}, false);
     }
 
     response += "\r\n";
@@ -220,8 +261,9 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                     // Process the line we received.
                     auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
                     read_buffers_range range_line{read_buffers_iterator::begin(line), read_buffers_iterator::end(line)};
+                    auto r = execute_command(range_line);
                     std::string response;
-                    std::tie(response, m_write_and_quit) = execute_command(range_line);
+                    std::tie(response, m_write_and_quit) = r.value();
                     m_read_buffer.consume(pos_nl);
 
                     // Prepare the response buffer
