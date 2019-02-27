@@ -1,5 +1,5 @@
-#include <boost/algorithm/string.hpp>
-#include <boost/algorithm/string/trim_all.hpp>
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/buffers_iterator.hpp>
@@ -13,13 +13,17 @@
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/beast/core/stream_traits.hpp>
 #include <boost/predef.h>
-#include <charconv>
+#include <boost/spirit/include/qi_numeric.hpp>
+#include <boost/spirit/include/qi_parse.hpp>
+#include <deque>
 #include <iostream>
+#include <list>
 #include <optional>
+#include <string>
 #include <thread>
 
-namespace net = boost::asio;
 namespace beast = boost::beast;
+namespace net = boost::asio;
 
 namespace {
 
@@ -36,6 +40,122 @@ template <typename F> struct [[nodiscard]] scope_exit {
     F const m_f;
 };
 template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
+
+// Parses an integer from A (Boost) range of characters.
+template <typename Range> std::int64_t parse_int64(Range const &word) {
+    [[maybe_unused]] auto const begin = boost::begin(word);
+    [[maybe_unused]] auto const end = boost::end(word);
+    std::int64_t value = 0;
+#ifndef __clang_analyzer__
+    auto i = begin;
+    bool result = boost::spirit::qi::parse(i, end, boost::spirit::long_long, value);
+    if (!result || i != end) {
+        throw std::runtime_error("int64 parse error");
+    }
+#endif
+    return value;
+}
+
+// Processes a remote command.
+// Returns the response and a flag indicating this is the last command to execute.
+template <typename Range> std::pair<std::string, bool> execute_command(Range const &line) {
+    // Split the command in words.
+    // Note that split() doesn't elimintate leading and trailing empty substrings.
+    std::list<Range> words; // or std::deque<Range> words;
+
+    boost::algorithm::split(words, line, boost::is_any_of("\t \r\n"), boost::algorithm::token_compress_on);
+    while (!words.empty() && boost::empty(words.front())) {
+        words.pop_front();
+    }
+    while (!words.empty() && boost::empty(words.back())) {
+        words.pop_back();
+    }
+
+    static char const *const help = "Help:\r\n"
+                                    "    quit                        End the session\r\n"
+                                    "    sum <integer>...            Addition\r\n"
+                                    "    sub <integer>...            Substraction\r\n"
+                                    "    mul <integer>...            Multiplication\r\n"
+                                    "    div <integer>...            Division\r\n"
+                                    "    mod <integer> <integer>     Remainder\r\n"
+                                    "    <anything else>             This message\r\n";
+
+    if (words.empty()) {
+        return {help, false};
+    }
+
+    auto command = words.front();
+    words.pop_front();
+
+    std::string response;
+    bool quit = false;
+
+    using namespace std::literals::string_view_literals;
+    if (command == "quit"sv) {
+        response = "quitting";
+        quit = true;
+    } else if (command == "sum"sv) {
+        std::int64_t sum = 0;
+        for (auto const &w : words) {
+            auto i = parse_int64(w);
+            sum += i;
+        }
+        response = std::to_string(sum);
+    } else if (command == "sub"sv) {
+        if (words.size() < 2) {
+            response = "sub: at least two integers are expected";
+        } else {
+            auto sub = parse_int64(words.front());
+            words.pop_front();
+            for (auto const &w : words) {
+                auto i = parse_int64(w);
+                sub -= i;
+            }
+            response = std::to_string(sub);
+        }
+    } else if (command == "mul"sv) {
+        std::int64_t mul = 1;
+        for (auto const &w : words) {
+            auto i = parse_int64(w);
+            mul *= i;
+        }
+        response = std::to_string(mul);
+    } else if (command == "div"sv) {
+        if (words.size() < 2) {
+            response = "div: at least two integers are expected";
+        } else {
+            auto div = parse_int64(words.front());
+            words.pop_front();
+            for (auto const &w : words) {
+                auto i = parse_int64(w);
+                if (i == 0) {
+                    return {"div: division by zero\r\n", quit};
+                }
+                div /= i;
+            }
+            response = std::to_string(div);
+        }
+    } else if (command == "mod"sv) {
+        if (words.size() != 2) {
+            response = "mod: exactly two integers are expected";
+        } else {
+            auto i1 = parse_int64(words.front());
+            words.pop_front();
+            auto i2 = parse_int64(words.front());
+            words.pop_front();
+            if (i2 == 0) {
+                response = "mod: division by zero";
+            } else {
+                response = std::to_string(i1 % i2);
+            }
+        }
+    } else {
+        return {help, false};
+    }
+
+    response += "\r\n";
+    return std::make_pair(response, quit);
+}
 
 // A composed that implements a demo server side remote-procedure call.
 // It is based on:
@@ -56,6 +176,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         AsyncStream &m_stream;
         DynamicReadBuffer &m_read_buffer;
         DynamicWriteBuffer &m_write_buffer;
+        bool m_write_and_quit;
 
 #if BOOST_COMP_CLANG
 #pragma clang diagnostic push
@@ -63,6 +184,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
 #endif
         using read_buffers_type = typename DynamicReadBuffer::const_buffers_type;
         using read_buffers_iterator = net::buffers_iterator<read_buffers_type>;
+        using read_buffers_range = boost::iterator_range<read_buffers_iterator>;
 
         using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
         using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
@@ -74,7 +196,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         internal_op(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
                     handler_type &&handler)
             : base_type{std::move(handler), stream.get_executor()}, m_stream(stream), m_read_buffer(read_buffer),
-              m_write_buffer(write_buffer) {
+              m_write_buffer(write_buffer), m_write_and_quit{false} {
             start_read_some();
         }
 
@@ -97,8 +219,9 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
 
                     // Process the line we received.
                     auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
-                    std::string response = process_line(line);
-                    response += "\n";
+                    read_buffers_range range_line{read_buffers_iterator::begin(line), read_buffers_iterator::end(line)};
+                    std::string response;
+                    std::tie(response, m_write_and_quit) = execute_command(range_line);
                     m_read_buffer.consume(pos_nl);
 
                     // Prepare the response buffer
@@ -112,10 +235,12 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                 // If getting here, we completed a write operation.
                 assert(m_write_buffer.size() == bytes_transferred);
                 m_write_buffer.consume(bytes_transferred);
-                // And start reading a new message.
-                return start_read_some();
+                // And start reading a new message if not quitting.
+                if (!m_write_and_quit) {
+                    return start_read_some();
+                }
             }
-            // Operation complete here.
+            // Operation complete if we get here.
             this->invoke_now(ec);
         }
 
@@ -129,64 +254,6 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                 return 0;
             }
             return result + 1 - begin;
-        }
-
-        static std::string process_line(beast::buffers_prefix_view<read_buffers_type> const &line) {
-            // Converting the input line to a string for simplified processing.
-            std::string line_str = beast::buffers_to_string(line);
-            boost::algorithm::trim_all(line_str);
-            std::deque<std::string> line_words;
-            boost::algorithm::split(line_words, line_str, boost::is_any_of("\t \r\n"));
-
-            static char const *const help = "Help:\n"
-                                            "    sum <integer>...            Addition\n"
-                                            "    sub <integer>...            Substraction\n"
-                                            "    mul <integer>...            Multiplication\n"
-                                            "    div <integer>...            Division\n"
-                                            "    mod <integer> <integer>     Remainder\n"
-                                            "    <anything else>             This message";
-
-            if (line_words.empty()) {
-                return help;
-            }
-            std::string command = line_words.front();
-            line_words.pop_front();
-
-            if (command == "sum") {
-                std::size_t sum = 0;
-                for (auto const &w : line_words) {
-                    sum += get_integer(w);
-                }
-                return std::to_string(sum);
-            } else if (command == "sub") {
-                if (line_words.size() < 2) {
-                    return "sub: at least two integers are expected";
-                }
-                std::size_t sub = get_integer(line_words[0]);
-                line_words.pop_front();
-                for (auto const &w : line_words) {
-                    sub -= get_integer(w);
-                }
-                return std::to_string(sub);
-            } else if (command == "mul") {
-                std::size_t mul = 1;
-                for (auto const &w : line_words) {
-                    mul *= get_integer(w);
-                }
-                return std::to_string(mul);
-            } else if (command == "div") {
-                return "todo";
-            } else if (command == "mod") {
-                return "todo";
-            } else {
-                return help;
-            }
-        }
-
-        static long long get_integer(std::string const &word) {
-            long long value = 0;
-            std::from_chars(word.data(), word.data() + word.size(), value, 10);
-            return value;
         }
     };
 
@@ -205,8 +272,8 @@ int main(int argc, char **argv) {
             return -1;
         }
 
-        auto const address{net::ip::make_address(argv[1])};                            // NOLINT
-        auto const port{static_cast<std::uint16_t>(std::strtol(argv[2], nullptr, 0))}; // NOLINT
+        auto const address{net::ip::make_address(argv[1])};              // NOLINT
+        auto const port{static_cast<std::uint16_t>(std::atoi(argv[2]))}; // NOLINT
         net::ip::tcp::endpoint const endpoint{address, port};
 
         net::io_context io_context;
@@ -227,8 +294,12 @@ int main(int argc, char **argv) {
         });
 
         // Start the server acceptor and wait for a client.
-        std::cout << "Server: Starting on: " << endpoint << std::endl;
         net::ip::tcp::acceptor acceptor{io_context, endpoint};
+        auto local_endpoint = acceptor.local_endpoint();
+        std::cout << "Server: Started on: " << local_endpoint << std::endl;
+        std::cout << "Try in a different terminal:\n    telnet " << local_endpoint.address() << " "
+                  << local_endpoint.port() << "\n    help<ENTER>" << std::endl;
+
 #ifndef __clang_analyzer__
         auto socket = acceptor.accept();
 #else
@@ -246,6 +317,10 @@ int main(int argc, char **argv) {
         } catch (std::exception const &e) {
             std::cout << "Server: Client work completed with error: " << e.what() << std::endl;
         }
+
+        // Let the remote side we are shutting down
+        error_code ignored;
+        socket.shutdown(net::ip::tcp::socket::shutdown_both, ignored);
 
     } catch (std::exception const &e) {
         std::cerr << "Server error: " << e.what() << std::endl;
