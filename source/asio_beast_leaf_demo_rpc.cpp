@@ -104,7 +104,7 @@ struct e_arg_count {
 template <typename Range> leaf::result<std::pair<std::string, bool>> execute_command(Range const &line) {
     // Split the command in words.
     // Note that split() doesn't elimintate leading and trailing empty substrings.
-    std::list<Range> words; // or std::deque<Range> words;
+    std::deque<Range> words; // or std::list<Range> words;
 
     boost::algorithm::split(words, line, boost::is_any_of("\t \r\n"), boost::algorithm::token_compress_on);
     while (!words.empty() && boost::empty(words.front())) {
