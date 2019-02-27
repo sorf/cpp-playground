@@ -7,7 +7,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
-#include <boost/beast/core/async_op_base.hpp>
+#include <boost/beast/core/async_base.hpp>
 #include <boost/beast/core/buffers_prefix.hpp>
 #include <boost/beast/core/buffers_to_string.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
@@ -41,7 +41,7 @@ template <typename F> struct [[nodiscard]] scope_exit {
 };
 template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
 
-// Parses an integer from A (Boost) range of characters.
+// Parses an integer from a (Boost) range of characters.
 template <typename Range> std::int64_t parse_int64(Range const &word) {
     [[maybe_unused]] auto const begin = boost::begin(word);
     [[maybe_unused]] auto const end = boost::end(word);
@@ -159,7 +159,7 @@ template <typename Range> std::pair<std::string, bool> execute_command(Range con
 
 // A composed that implements a demo server side remote-procedure call.
 // It is based on:
-// https://github.com/boostorg/beast/blob/c82237512a95487fd67a4287f79f4458ba978f43/example/echo-op/echo_op.cpp
+// https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/echo-op/echo_op.cpp#L1
 // https://github.com/chriskohlhoff/asio/blob/e7b397142ae11545ea08fcf04db3008f588b4ce7/asio/src/examples/cpp11/operations/composed_5.cpp
 template <class AsyncStream, class DynamicReadBuffer, class DynamicWriteBuffer, typename CompletionToken>
 auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
@@ -171,7 +171,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
     static_assert(net::is_dynamic_buffer<DynamicWriteBuffer>::value, "DynamicBuffer type requirements not met");
 
     using handler_type = typename net::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
-    using base_type = beast::async_op_base<handler_type, beast::executor_type<AsyncStream>>;
+    using base_type = beast::async_base<handler_type, beast::executor_type<AsyncStream>>;
     struct internal_op : base_type {
         AsyncStream &m_stream;
         DynamicReadBuffer &m_read_buffer;
@@ -318,7 +318,7 @@ int main(int argc, char **argv) {
             std::cout << "Server: Client work completed with error: " << e.what() << std::endl;
         }
 
-        // Let the remote side we are shutting down
+        // Let the remote side know we are shutting down.
         error_code ignored;
         socket.shutdown(net::ip::tcp::socket::shutdown_both, ignored);
 

@@ -6,7 +6,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_future.hpp>
-#include <boost/beast/core/async_op_base.hpp>
+#include <boost/beast/core/async_base.hpp>
 #include <boost/format.hpp>
 #include <chrono>
 #include <iostream>
@@ -35,7 +35,7 @@ auto async_one_timer(asio::io_context &io_context, std::chrono::steady_clock::du
     };
 
     using handler_type = typename asio::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
-    using base_type = beast::stable_async_op_base<handler_type, asio::io_context::executor_type>;
+    using base_type = beast::stable_async_base<handler_type, asio::io_context::executor_type>;
     struct internal_op : base_type {
         state_data &data;
 
