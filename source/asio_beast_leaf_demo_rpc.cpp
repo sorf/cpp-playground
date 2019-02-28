@@ -1,4 +1,5 @@
 // Example of a composed asynchronous operation which uses the LEAF library for error handling and reporting.
+#include <algorithm>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/asio/async_result.hpp>
@@ -13,6 +14,7 @@
 #include <boost/beast/core/buffers_to_string.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/beast/core/stream_traits.hpp>
+#include <boost/format.hpp>
 #include <boost/leaf/all.hpp>
 #include <boost/predef.h>
 #include <boost/spirit/include/qi_numeric.hpp>
@@ -32,6 +34,16 @@ namespace {
 
 using error_code = boost::system::error_code;
 
+template <class TryBlock, class... H>
+decltype(auto) leaf_try_handle_some_no_lint(TryBlock && try_block, H && ... h) {
+#ifndef __clang_analyzer__
+    return leaf::try_handle_some(std::forward<TryBlock>(try_block), std::forward<H>(h)...);
+#else
+    [[maybe_unused]] auto unused = sizeof...(h);
+    return try_block();
+#endif
+}
+
 // A bare-bones on-scope-exit utility.
 template <typename F> struct [[nodiscard]] scope_exit {
     explicit scope_exit(F && f) : m_f(std::move(f)) {}
@@ -47,21 +59,26 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 // The location of a int64 parse error.
 // It refers the range of characters from which the parsing was done.
 template <typename Range> struct e_parse_int64_location {
-    std::pair<Range const, typename boost::range_iterator<Range>::type> value;
+    using location_base = std::pair<Range const, typename boost::range_iterator<Range>::type>;
+    struct location : public location_base {
+        using location_base::location_base;
 
-    friend std::ostream &operator<<(std::ostream &os, e_parse_int64_location const &e) {
-        std::string s{boost::begin(e.value.first), boost::end(e.value.first)};
-        std::string_view sv(s);
-        std::size_t pos = std::distance(boost::begin(e.value.first), e.value.second);
-        if (pos == 0) {
-            os << "err->" << sv;
-        } else if (pos < sv.size()) {
-            os << sv.substr(0, pos) << " err-> " << sv.substr(pos);
-        } else {
-            os << sv << "<-err";
+        friend std::ostream &operator<<(std::ostream &os, location const &l) {
+            std::string s{boost::begin(l.first), boost::end(l.first)};
+            std::string_view sv(s);
+            std::size_t pos = std::distance(boost::begin(l.first), l.second);
+            if (pos == 0) {
+                os << "err->" << sv;
+            } else if (pos < sv.size()) {
+                os << sv.substr(0, pos) << " err-> " << sv.substr(pos);
+            } else {
+                os << sv << "<-err";
+            }
+            return os;
         }
-        return os;
-    }
+    };
+
+    location value;
 };
 
 // Parses an integer from a range of characters.
@@ -88,20 +105,20 @@ struct e_expected_arg_count {
     struct range {
         std::size_t min;
         std::size_t max;
+
+        friend std::ostream &operator<<(std::ostream &os, range const &r) {
+            if (r.min == r.max) {
+                os << r.min;
+            } else if (r.max < SIZE_MAX) {
+                os << "[" << r.min << ", " << r.max << "]";
+            } else {
+                os << "[" << r.min << ", MAX]";
+            }
+            return os;
+        }
     };
 
     range value;
-
-    friend std::ostream &operator<<(std::ostream &os, e_expected_arg_count const &e) {
-        if (e.value.min == e.value.max) {
-            os << e.value.min;
-        } else if (e.value.max < SIZE_MAX) {
-            os << "[" << e.value.min << ", " << e.value.max << "]";
-        } else {
-            os << "[" << e.value.min << ", MAX]";
-        }
-        return os;
-    }
 };
 // The actual number of arguments for the command being executed when we get an error.
 struct e_arg_count {
@@ -123,17 +140,17 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         words.pop_back();
     }
 
-    static char const *const help_with_newline = "Help:\r\n"
-                                                 "    quit                        End the session\r\n"
-                                                 "    sum <int64>*                Addition\r\n"
-                                                 "    sub <int64>+                Substraction\r\n"
-                                                 "    mul <int64>*                Multiplication\r\n"
-                                                 "    div <int64>+                Division\r\n"
-                                                 "    mod <int64> <int64>         Remainder\r\n"
-                                                 "    <anything else>             This message\r\n";
+    static char const *const help = "Help:\n"
+                                    "    quit                        End the session\n"
+                                    "    sum <int64>*                Addition\n"
+                                    "    sub <int64>+                Substraction\n"
+                                    "    mul <int64>*                Multiplication\n"
+                                    "    div <int64>+                Division\n"
+                                    "    mod <int64> <int64>         Remainder\n"
+                                    "    <anything else>             This message";
 
     if (words.empty()) {
-        return std::make_pair(std::string{help_with_newline}, false);
+        return std::make_pair(std::string{help}, false);
     }
 
     auto command = words.front();
@@ -200,11 +217,28 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         }
         response = std::to_string(i1 % i2);
     } else {
-        return std::make_pair(std::string{help_with_newline}, false);
+        response = help;
     }
 
-    response += "\r\n";
     return std::make_pair(response, quit);
+}
+
+// Fixes newlines in a response.
+void adjust_response_newlines(std::string &response) {
+    if (response.empty() || response.back() != '\n') {
+        response.push_back('\n');
+    }
+    std::string new_response;
+    new_response.reserve(response.size() + 1);
+    for (char c : response) {
+        if (c == '\n') {
+            new_response.push_back('\r');
+        }
+        new_response.push_back(c);
+    }
+    [[maybe_unused]] auto it =
+        std::unique(new_response.begin(), new_response.end(), [](char c1, char c2) { return c1 == '\r' && c1 == c2; });
+    response.swap(new_response);
 }
 
 // A composed asynchronous operation that implements a basic remote calculator.
@@ -253,16 +287,18 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                     handler_type &&handler)
             : base_type{std::move(handler), stream.get_executor()}, m_stream(stream), m_read_buffer(read_buffer),
               m_write_buffer(write_buffer), m_write_and_quit{false} {
-            start_read_some();
+
+            // Simulating that we received an empty line so that we send the "help" message as soon as a client connects
+            using mutable_iterator = net::buffers_iterator<typename DynamicReadBuffer::mutable_buffers_type>;
+            auto b = m_read_buffer.prepare(1);
+            auto i = mutable_iterator::begin(b);
+            [[maybe_unused]] auto end = mutable_iterator::end(b);
+            *i++ = '\n';
+            assert(i == end);
+            (*this)({}, 1, false);
         }
 
-        void start_read_some() {
-            std::size_t bytes_to_read = 3; // A small value for testing purposes
-                                           // (multiple `operator()` calls for most messages)
-            m_stream.async_read_some(m_read_buffer.prepare(bytes_to_read), std::move(*this));
-        }
-
-        void operator()(error_code ec, std::size_t bytes_transferred = 0) {
+        void operator()(error_code ec, std::size_t bytes_transferred = 0, bool is_continuation = true) {
             if (!ec) {
                 if (m_write_buffer.size() == 0) {
                     // We read something.
@@ -275,13 +311,26 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
 
                     // Process the line we received.
                     auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
-                    read_buffers_range range_line{read_buffers_iterator::begin(line), read_buffers_iterator::end(line)};
-                    auto r = execute_command(range_line);
-                    std::string response;
-                    std::tie(response, m_write_and_quit) = r.value();
+                    read_buffers_range rline{read_buffers_iterator::begin(line), read_buffers_iterator::end(line)};
+
+                    auto make_error_response = [](auto const &diag, char const *what = "") {
+                        return std::make_pair(
+                            boost::str(boost::format("error: %1%\n----\ndiagnostic:\n%2%\n----") % what % diag), false);
+                    };
+                    auto r = leaf_try_handle_some_no_lint(
+                        [rline]() { return execute_command(rline); },
+                        [&](leaf::catch_<std::exception> e, leaf::verbose_diagnostic_info const &diag) {
+                            return make_error_response(diag, e.value().what());
+                        },
+                        [&](leaf::verbose_diagnostic_info const &diag) { return make_error_response(diag); });
+                    // After processing and/or error handling we can consume the read buffer.
                     m_read_buffer.consume(pos_nl);
 
+                    std::string &response = r.value().first;
+                    m_write_and_quit = r.value().second;
+
                     // Prepare the response buffer
+                    adjust_response_newlines(response);
                     std::size_t write_size = response.size();
                     auto response_buffers = m_write_buffer.prepare(write_size);
                     std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
@@ -298,7 +347,13 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                 }
             }
             // Operation complete if we get here.
-            this->invoke_now(ec);
+            this->invoke(is_continuation, ec);
+        }
+
+        void start_read_some() {
+            std::size_t bytes_to_read = 3; // A small value for testing purposes
+                                           // (multiple `operator()` calls for most messages)
+            m_stream.async_read_some(m_read_buffer.prepare(bytes_to_read), std::move(*this));
         }
 
         // Same as:
