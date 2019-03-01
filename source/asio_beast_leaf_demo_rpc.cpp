@@ -18,7 +18,6 @@
 #include <boost/beast/core/stream_traits.hpp>
 #include <boost/format.hpp>
 #include <boost/leaf/all.hpp>
-#include <boost/predef.h>
 #include <boost/spirit/include/qi_numeric.hpp>
 #include <boost/spirit/include/qi_parse.hpp>
 #include <deque>
@@ -214,8 +213,10 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
     return std::make_pair(response, quit);
 }
 
-// Creates an error handler for constructing a response message to send back to the remote client (using _handle_some).
-template <typename Range> decltype(auto) make_error_handler_some() {
+// Creates an error handler for errors coming out of `execute_command`.
+// It constructs a response message to send back to the remote client.
+// It uses leaf::remote_handle_some (see https://zajo.github.io/leaf/#remote_try_handle_some)
+template <typename Range> decltype(auto) make_execute_command_error_handler_some() {
     using e_command_r = e_command<Range>;
     using e_parse_int64_error_r = e_parse_int64_error<Range>;
 
@@ -274,33 +275,29 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
     static_assert(net::is_dynamic_buffer<DynamicReadBuffer>::value, "DynamicBuffer type requirements not met");
     static_assert(net::is_dynamic_buffer<DynamicWriteBuffer>::value, "DynamicBuffer type requirements not met");
 
+    using read_buffers_type = typename DynamicReadBuffer::const_buffers_type;
+    using read_buffers_iterator = net::buffers_iterator<read_buffers_type>;
+    using read_buffers_range = boost::iterator_range<read_buffers_iterator>;
+    using execute_error_handler_t = decltype(make_execute_command_error_handler_some<read_buffers_range>());
+
+    using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
+    using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
+
     using handler_type = typename net::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
     using base_type = beast::async_base<handler_type, beast::executor_type<AsyncStream>>;
     struct internal_op : base_type {
         AsyncStream &m_stream;
         DynamicReadBuffer &m_read_buffer;
         DynamicWriteBuffer &m_write_buffer;
+        execute_error_handler_t m_execute_error_handler;
         bool m_write_and_quit;
-
-#if BOOST_COMP_CLANG
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-local-typedefs"
-#endif
-        using read_buffers_type = typename DynamicReadBuffer::const_buffers_type;
-        using read_buffers_iterator = net::buffers_iterator<read_buffers_type>;
-        using read_buffers_range = boost::iterator_range<read_buffers_iterator>;
-
-        using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
-        using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
-
-#if BOOST_COMP_CLANG
-#pragma clang diagnostic pop
-#endif
 
         internal_op(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
                     handler_type &&handler)
-            : base_type{std::move(handler), stream.get_executor()}, m_stream(stream), m_read_buffer(read_buffer),
-              m_write_buffer(write_buffer), m_write_and_quit{false} {
+            : base_type{std::move(handler), stream.get_executor()}, m_stream{stream}, m_read_buffer{read_buffer},
+              m_write_buffer{write_buffer},
+              m_execute_error_handler{make_execute_command_error_handler_some<read_buffers_range>()}, m_write_and_quit{
+                                                                                                          false} {
 
             // Simulating that we received an empty line so that we send the "help" message as soon as a client connects
             using mutable_iterator = net::buffers_iterator<typename DynamicReadBuffer::mutable_buffers_type>;
@@ -326,15 +323,13 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                     // Process the line we received.
                     auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
                     read_buffers_range rline{read_buffers_iterator::begin(line), read_buffers_iterator::end(line)};
-
-                    auto error_handler_some = make_error_handler_some<read_buffers_range>();
                     auto r = leaf::remote_try_handle_some(
                         [rline, this]() -> leaf::result<std::string> {
                             LEAF_AUTO(pair_response_quit, execute_command(rline));
                             m_write_and_quit = pair_response_quit.second;
                             return std::move(pair_response_quit.first);
                         },
-                        [&](leaf::error_info const &error) { return error_handler_some(error); });
+                        [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
                     std::string &response = r.value();
                     // After processing and/or error handling we can consume the read buffer.
                     m_read_buffer.consume(pos_nl);
