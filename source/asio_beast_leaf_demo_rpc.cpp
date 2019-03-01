@@ -151,6 +151,8 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
     std::string response;
     bool quit = false;
 
+    // We need to compare the command (a boost::iterator_range of chars) against null terminated strings converted to
+    // std::string_view so they are proper ranges. We use the string_view literal for this conversion.
     using namespace std::literals::string_view_literals;
     if (command == "quit"sv) {
         response = "quitting";
