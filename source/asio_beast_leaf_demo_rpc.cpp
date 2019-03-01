@@ -221,7 +221,7 @@ template <typename Range> decltype(auto) make_error_handler_some() {
 
     auto error_prefix = [](e_command_r const *cmd) {
         if (cmd != nullptr) {
-            return boost::str(boost::format("Error (%1%):") % cmd);
+            return boost::str(boost::format("Error (%1%):") % cmd->value);
         }
         return std::string("Error:");
     };
