@@ -1,6 +1,8 @@
 // Example of a composed asynchronous operation which uses the LEAF library for error handling and reporting.
 #include <algorithm>
 #include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/erase.hpp>
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/buffer.hpp>
@@ -34,16 +36,6 @@ namespace {
 
 using error_code = boost::system::error_code;
 
-template <class TryBlock, class... H>
-decltype(auto) leaf_try_handle_some_no_lint(TryBlock && try_block, H && ... h) {
-#ifndef __clang_analyzer__
-    return leaf::try_handle_some(std::forward<TryBlock>(try_block), std::forward<H>(h)...);
-#else
-    [[maybe_unused]] auto unused = sizeof...(h);
-    return try_block();
-#endif
-}
-
 // A bare-bones on-scope-exit utility.
 template <typename F> struct [[nodiscard]] scope_exit {
     explicit scope_exit(F && f) : m_f(std::move(f)) {}
@@ -58,21 +50,21 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 
 // The location of a int64 parse error.
 // It refers the range of characters from which the parsing was done.
-template <typename Range> struct e_parse_int64_location {
+template <typename Range> struct e_parse_int64_error {
     using location_base = std::pair<Range const, typename boost::range_iterator<Range>::type>;
     struct location : public location_base {
         using location_base::location_base;
 
-        friend std::ostream &operator<<(std::ostream &os, location const &l) {
-            std::string s{boost::begin(l.first), boost::end(l.first)};
-            std::string_view sv(s);
-            std::size_t pos = std::distance(boost::begin(l.first), l.second);
+        friend std::ostream &operator<<(std::ostream &os, location const &value) {
+            std::string s{boost::begin(value.first), boost::end(value.first)};
+            std::string_view sv{s};
+            std::size_t pos = std::distance(boost::begin(value.first), value.second);
             if (pos == 0) {
-                os << "err->" << sv;
+                os << "->\"" << sv << "\"";
             } else if (pos < sv.size()) {
-                os << sv.substr(0, pos) << " err-> " << sv.substr(pos);
+                os << "\"" << sv.substr(0, pos) << "\"->\"" << sv.substr(pos) << "\"";
             } else {
-                os << sv << "<-err";
+                os << "\"" << sv << "\"<-";
             }
             return os;
         }
@@ -90,7 +82,7 @@ template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &wo
     auto i = begin;
     bool result = boost::spirit::qi::parse(i, end, boost::spirit::long_long, value);
     if (!result || i != end) {
-        return leaf::new_error(e_parse_int64_location<Range>{std::make_pair(word, i)});
+        return leaf::new_error(e_parse_int64_error<Range>{std::make_pair(word, i)});
     }
 #endif
     return value;
@@ -99,30 +91,30 @@ template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &wo
 // The command being executed while we get an error.
 // It refers the range of characters from which the command was extracted.
 template <typename Range> struct e_command { Range value; };
-// The expected number or arguments for the command being executed when we get an error.
+
+// The details about an incorrect number of arguments error
 // Some commands may accept a variable number of arguments (e.g. greater than 1 would mean [2, SIZE_MAX]).
-struct e_expected_arg_count {
-    struct range {
+struct e_unexpected_arg_count {
+    struct arg_info {
+        std::size_t count;
         std::size_t min;
         std::size_t max;
 
-        friend std::ostream &operator<<(std::ostream &os, range const &r) {
-            if (r.min == r.max) {
-                os << r.min;
-            } else if (r.max < SIZE_MAX) {
-                os << "[" << r.min << ", " << r.max << "]";
+        friend std::ostream &operator<<(std::ostream &os, arg_info const &value) {
+            os << value.count << " (required: ";
+            if (value.min == value.max) {
+                os << value.min;
+            } else if (value.max < SIZE_MAX) {
+                os << "[" << value.min << ", " << value.max << "]";
             } else {
-                os << "[" << r.min << ", MAX]";
+                os << "[" << value.min << ", MAX]";
             }
+            os << ")";
             return os;
         }
     };
 
-    range value;
-};
-// The actual number of arguments for the command being executed when we get an error.
-struct e_arg_count {
-    std::size_t value;
+    arg_info value;
 };
 
 // Processes a remote command.
@@ -157,7 +149,6 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
     words.pop_front();
 
     auto load_cmd = leaf::preload(e_command<Range>{command});
-    auto load_arg_count = leaf::preload(e_arg_count{words.size()});
     std::string response;
     bool quit = false;
 
@@ -174,7 +165,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         response = std::to_string(sum);
     } else if (command == "sub"sv) {
         if (words.size() < 2) {
-            return leaf::new_error(e_expected_arg_count{{2, SIZE_MAX}});
+            return leaf::new_error(e_unexpected_arg_count{words.size(), 2, SIZE_MAX});
         }
         LEAF_AUTO(sub, parse_int64(words.front()));
         words.pop_front();
@@ -192,7 +183,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         response = std::to_string(mul);
     } else if (command == "div"sv) {
         if (words.size() < 2) {
-            return leaf::new_error(e_expected_arg_count{{2, SIZE_MAX}});
+            return leaf::new_error(e_unexpected_arg_count{words.size(), 2, SIZE_MAX});
         }
         LEAF_AUTO(div, parse_int64(words.front()));
         words.pop_front();
@@ -206,7 +197,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         response = std::to_string(div);
     } else if (command == "mod"sv) {
         if (words.size() != 2) {
-            return leaf::new_error(e_expected_arg_count{{2, 2}});
+            return leaf::new_error(e_unexpected_arg_count{words.size(), 2, 2});
         }
         LEAF_AUTO(i1, parse_int64(words.front()));
         words.pop_front();
@@ -223,22 +214,45 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
     return std::make_pair(response, quit);
 }
 
-// Fixes newlines in a response.
-void adjust_response_newlines(std::string &response) {
-    if (response.empty() || response.back() != '\n') {
-        response.push_back('\n');
-    }
-    std::string new_response;
-    new_response.reserve(response.size() + 1);
-    for (char c : response) {
-        if (c == '\n') {
-            new_response.push_back('\r');
+// Creates an error handler for constructing a response message to send back to the remote client (using _handle_some).
+template <typename Range> decltype(auto) make_error_handler_some() {
+    using e_command_r = e_command<Range>;
+    using e_parse_int64_error_r = e_parse_int64_error<Range>;
+
+    auto error_prefix = [](e_command_r const *cmd) {
+        if (cmd != nullptr) {
+            return boost::str(boost::format("Error (%1%):") % cmd);
         }
-        new_response.push_back(c);
-    }
-    [[maybe_unused]] auto it =
-        std::unique(new_response.begin(), new_response.end(), [](char c1, char c2) { return c1 == '\r' && c1 == c2; });
-    response.swap(new_response);
+        return std::string("Error:");
+    };
+    auto diag_to_str = [](leaf::verbose_diagnostic_info const &diag) {
+        auto diag_str = boost::str(boost::format("%1%") % diag);
+        boost::algorithm::replace_all(diag_str, "\n", "\n    ");
+        return "\nDetailed error diagnostic:\n----\n" + diag_str + "\n----";
+    };
+
+    using result_t = leaf::result<std::string>;
+    return [error_prefix, diag_to_str](leaf::error_info const &error) {
+        return leaf::remote_handle_some(
+            error,
+            [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
+                return result_t{boost::str(boost::format("%1% int64 parse error: %2%") % error_prefix(cmd) % e.value) +
+                                diag_to_str(diag)};
+            },
+            [&](e_unexpected_arg_count const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
+                return result_t{
+                    boost::str(boost::format("%1% incorrect number of arguments: %2%") % error_prefix(cmd) % e.value) +
+                    diag_to_str(diag)};
+            },
+            [&](leaf::catch_<std::exception> e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
+                return result_t{boost::str(boost::format("%1% %2%") % error_prefix(cmd) % e.value().what()) +
+                                diag_to_str(diag)};
+            },
+            [&](e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
+                return result_t{boost::str(boost::format("%1% unknown failure") % error_prefix(cmd)) +
+                                diag_to_str(diag)};
+            });
+    };
 }
 
 // A composed asynchronous operation that implements a basic remote calculator.
@@ -313,24 +327,26 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                     auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
                     read_buffers_range rline{read_buffers_iterator::begin(line), read_buffers_iterator::end(line)};
 
-                    auto make_error_response = [](auto const &diag, char const *what = "") {
-                        return std::make_pair(
-                            boost::str(boost::format("error: %1%\n----\ndiagnostic:\n%2%\n----") % what % diag), false);
-                    };
-                    auto r = leaf_try_handle_some_no_lint(
-                        [rline]() { return execute_command(rline); },
-                        [&](leaf::catch_<std::exception> e, leaf::verbose_diagnostic_info const &diag) {
-                            return make_error_response(diag, e.value().what());
+                    auto error_handler_some = make_error_handler_some<read_buffers_range>();
+                    auto r = leaf::remote_try_handle_some(
+                        [rline, this]() -> leaf::result<std::string> {
+                            LEAF_AUTO(pair_response_quit, execute_command(rline));
+                            m_write_and_quit = pair_response_quit.second;
+                            return std::move(pair_response_quit.first);
                         },
-                        [&](leaf::verbose_diagnostic_info const &diag) { return make_error_response(diag); });
+                        [&](leaf::error_info const &error) { return error_handler_some(error); });
+                    std::string &response = r.value();
                     // After processing and/or error handling we can consume the read buffer.
                     m_read_buffer.consume(pos_nl);
 
-                    std::string &response = r.value().first;
-                    m_write_and_quit = r.value().second;
-
                     // Prepare the response buffer
-                    adjust_response_newlines(response);
+                    // (including fixing the newlines to be '\r\n' for remote telnet clients)
+                    if (response.empty() || response.back() != '\n') {
+                        response.push_back('\n');
+                    }
+                    boost::algorithm::erase_all(response, "\r");
+                    boost::algorithm::replace_all(response, "\n", "\r\n");
+
                     std::size_t write_size = response.size();
                     auto response_buffers = m_write_buffer.prepare(write_size);
                     std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
