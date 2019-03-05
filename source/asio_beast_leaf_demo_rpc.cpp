@@ -12,9 +12,8 @@
 #include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core/async_base.hpp>
-#include <boost/beast/core/buffers_prefix.hpp>
-#include <boost/beast/core/buffers_to_string.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/core/multi_buffer.hpp>
 #include <boost/beast/core/stream_traits.hpp>
 #include <boost/format.hpp>
 #include <boost/leaf/all.hpp>
@@ -323,11 +322,12 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                     }
 
                     // Process the line we received.
-                    auto line = beast::buffers_prefix(pos_nl, m_read_buffer.data());
-                    read_buffers_range rline{read_buffers_iterator::begin(line), read_buffers_iterator::end(line)};
+                    auto line_begin = read_buffers_iterator::begin(m_read_buffer.data());
+                    auto line_end = line_begin + pos_nl;
+                    read_buffers_range line{line_begin, line_end};
                     auto r = leaf::remote_try_handle_some(
-                        [rline, this]() -> leaf::result<std::string> {
-                            LEAF_AUTO(pair_response_quit, execute_command(rline));
+                        [line, this]() -> leaf::result<std::string> {
+                            LEAF_AUTO(pair_response_quit, execute_command(line));
                             m_write_and_quit = pair_response_quit.second;
                             return std::move(pair_response_quit.first);
                         },
@@ -433,7 +433,7 @@ int main(int argc, char **argv) {
         std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
 
         // Start the `async_demo_rpc` operation and wait for its completion.
-        beast::flat_buffer read_buffer;
+        beast::multi_buffer read_buffer; // or beast::flat_buffer read_buffer;
         beast::flat_buffer write_buffer;
         std::future<void> f = async_demo_rpc(socket, read_buffer, write_buffer, net::use_future);
         try {
