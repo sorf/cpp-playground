@@ -216,43 +216,38 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
 
 // Creates an error handler for errors coming out of `execute_command`.
 // It constructs a response message to send back to the remote client.
-// It uses leaf::remote_handle_some (see https://zajo.github.io/leaf/#remote_try_handle_some)
-template <typename Range> decltype(auto) make_execute_command_error_handler_some() {
+// It uses leaf::remote_handle_all (see https://zajo.github.io/leaf/#remote_try_handle_all)
+template <typename Range> decltype(auto) make_execute_command_error_handler_all() {
     using e_command_r = e_command<Range>;
     using e_parse_int64_error_r = e_parse_int64_error<Range>;
 
-    auto error_prefix = [](e_command_r const *cmd) {
+    auto e_prefix = [](e_command_r const *cmd) {
         if (cmd != nullptr) {
             return boost::str(boost::format("Error (%1%):") % cmd->value);
         }
         return std::string("Error:");
     };
-    auto diag_to_str = [](leaf::verbose_diagnostic_info const &diag) {
-        auto diag_str = boost::str(boost::format("%1%") % diag);
-        boost::algorithm::replace_all(diag_str, "\n", "\n    ");
-        return "\nDetailed error diagnostic:\n----\n" + diag_str + "\n----";
+    auto diag_s = [](leaf::verbose_diagnostic_info const &diag) {
+        auto str = boost::str(boost::format("%1%") % diag);
+        boost::algorithm::replace_all(str, "\n", "\n    ");
+        return "\nDetailed error diagnostic:\n----\n" + str + "\n----";
     };
 
-    using result_t = leaf::result<std::string>;
-    return [error_prefix, diag_to_str](leaf::error_info const &error) {
-        return leaf::remote_handle_some(
+    return [e_prefix, diag_s](leaf::error_info const &error) {
+        return leaf::remote_handle_all(
             error,
             [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return result_t{boost::str(boost::format("%1% int64 parse error: %2%") % error_prefix(cmd) % e.value) +
-                                diag_to_str(diag)};
+                return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) + diag_s(diag);
             },
             [&](e_unexpected_arg_count const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return result_t{
-                    boost::str(boost::format("%1% incorrect number of arguments: %2%") % error_prefix(cmd) % e.value) +
-                    diag_to_str(diag)};
+                return boost::str(boost::format("%1% wrong argument count: %2%") % e_prefix(cmd) % e.value) +
+                       diag_s(diag);
             },
             [&](leaf::catch_<std::exception> e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return result_t{boost::str(boost::format("%1% %2%") % error_prefix(cmd) % e.value().what()) +
-                                diag_to_str(diag)};
+                return boost::str(boost::format("%1% %2%") % e_prefix(cmd) % e.value().what()) + diag_s(diag);
             },
             [&](e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return result_t{boost::str(boost::format("%1% unknown failure") % error_prefix(cmd)) +
-                                diag_to_str(diag)};
+                return boost::str(boost::format("%1% unknown failure") % e_prefix(cmd)) + diag_s(diag);
             });
     };
 }
@@ -279,7 +274,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
     using read_buffers_type = typename DynamicReadBuffer::const_buffers_type;
     using read_buffers_iterator = net::buffers_iterator<read_buffers_type>;
     using read_buffers_range = boost::iterator_range<read_buffers_iterator>;
-    using execute_error_handler_t = decltype(make_execute_command_error_handler_some<read_buffers_range>());
+    using execute_error_handler_t = decltype(make_execute_command_error_handler_all<read_buffers_range>());
 
     using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
     using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
@@ -297,8 +292,8 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                     handler_type &&handler)
             : base_type{std::move(handler), stream.get_executor()}, m_stream{stream}, m_read_buffer{read_buffer},
               m_write_buffer{write_buffer},
-              m_execute_error_handler{make_execute_command_error_handler_some<read_buffers_range>()}, m_write_and_quit{
-                                                                                                          false} {
+              m_execute_error_handler{make_execute_command_error_handler_all<read_buffers_range>()}, m_write_and_quit{
+                                                                                                         false} {
 
             // Simulating that we received an empty line so that we send the "help" message as soon as a client connects
             using mutable_iterator = net::buffers_iterator<typename DynamicReadBuffer::mutable_buffers_type>;
@@ -325,14 +320,13 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                     auto line_begin = read_buffers_iterator::begin(m_read_buffer.data());
                     auto line_end = line_begin + pos_nl;
                     read_buffers_range line{line_begin, line_end};
-                    auto r = leaf::remote_try_handle_some(
+                    std::string response = leaf::remote_try_handle_all(
                         [line, this]() -> leaf::result<std::string> {
                             LEAF_AUTO(pair_response_quit, execute_command(line));
                             m_write_and_quit = pair_response_quit.second;
                             return std::move(pair_response_quit.first);
                         },
                         [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
-                    std::string &response = r.value();
                     // After processing and/or error handling we can consume the read buffer.
                     m_read_buffer.consume(pos_nl);
 
