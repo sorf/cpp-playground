@@ -115,6 +115,11 @@ struct e_unexpected_arg_count {
     arg_info value;
 };
 
+struct e_error_quit {
+    struct none_t {};
+    none_t value;
+};
+
 // Processes a remote command.
 // Returns the response and a flag indicating this is the last command to execute.
 template <typename Range> leaf::result<std::pair<std::string, bool>> execute_command(Range const &line) {
@@ -132,6 +137,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
 
     static char const *const help = "Help:\n"
                                     "    quit                        End the session\n"
+                                    "    error-quit                  Simulated error to end the session\n"
                                     "    sum <int64>*                Addition\n"
                                     "    sub <int64>+                Substraction\n"
                                     "    mul <int64>*                Multiplication\n"
@@ -156,6 +162,8 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
     if (command == "quit"sv) {
         response = "quitting";
         quit = true;
+    } else if (command == "error-quit"sv) {
+        return leaf::new_error(e_error_quit{});
     } else if (command == "sum"sv) {
         std::int64_t sum = 0;
         for (auto const &w : words) {
@@ -236,6 +244,9 @@ template <typename Range> decltype(auto) make_execute_command_error_handler_all(
     return [e_prefix, diag_s](leaf::error_info const &error) {
         return leaf::remote_handle_all(
             error,
+            [](e_error_quit const&) -> std::string {
+                throw std::runtime_error("error_quit");
+            },
             [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
                 return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) + diag_s(diag);
             },
