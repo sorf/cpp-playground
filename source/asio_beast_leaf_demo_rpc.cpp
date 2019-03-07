@@ -243,10 +243,7 @@ template <typename Range> decltype(auto) make_execute_command_error_handler_all(
 
     return [e_prefix, diag_s](leaf::error_info const &error) {
         return leaf::remote_handle_all(
-            error,
-            [](e_error_quit const&) -> std::string {
-                throw std::runtime_error("error_quit");
-            },
+            error, [](e_error_quit const &) -> std::string { throw std::runtime_error("error_quit"); },
             [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
                 return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) + diag_s(diag);
             },
@@ -365,7 +362,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                 }
             }
             // Operation complete if we get here.
-            this->invoke(is_continuation, ec);
+            this->complete(is_continuation, ec);
         }
 
         void start_read_some() {
@@ -387,9 +384,14 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         }
     };
 
-    typename net::async_completion<CompletionToken, void(error_code)> init(token);
-    internal_op op{stream, read_buffer, write_buffer, std::move(init.completion_handler)};
-    return init.result.get();
+    auto initiation = [](auto &&completion_handler, AsyncStream *stream, DynamicReadBuffer *read_buffer,
+                         DynamicWriteBuffer *write_buffer) {
+        internal_op op{*stream, *read_buffer, *write_buffer,
+                       std::forward<decltype(completion_handler)>(completion_handler)};
+    };
+
+    return net::async_initiate<CompletionToken, void(error_code)>(initiation, token, &stream, &read_buffer,
+                                                                  &write_buffer);
 }
 
 } // namespace
