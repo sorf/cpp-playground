@@ -198,6 +198,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         for (auto const &w : words) {
             LEAF_AUTO(i, parse_int64(w));
             if (i == 0) {
+                // In some cases this command execution function might throw, not just return an error.
                 throw std::runtime_error{"division by zero"};
             }
             div /= i;
@@ -212,6 +213,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
         LEAF_AUTO(i2, parse_int64(words.front()));
         words.pop_front();
         if (i2 == 0) {
+            // In some cases this command execution function might throw, not just return an error.
             throw leaf::exception(std::runtime_error{"division by zero"});
         }
         response = std::to_string(i1 % i2);
