@@ -215,13 +215,11 @@ template <typename CharRange> leaf::result<std::int64_t> parse_int64(CharRange c
     [[maybe_unused]] auto const begin = boost::begin(word);
     [[maybe_unused]] auto const end = boost::end(word);
     std::int64_t value = 0;
-#ifndef __clang_analyzer__
     auto i = begin;
     bool result = boost::spirit::qi::parse(i, end, boost::spirit::long_long, value);
     if (!result || i != end) {
         return leaf::new_error(e_parse_int64_error<CharRange>{std::make_pair(word, i)});
     }
-#endif
     return value;
 }
 
@@ -418,13 +416,13 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 int main(int argc, char **argv) {
     try {
         if (argc != 3) {
-            std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;    // NOLINT
-            std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl; // NOLINT
+            std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;
+            std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl;
             return -1;
         }
 
-        auto const address{net::ip::make_address(argv[1])};              // NOLINT
-        auto const port{static_cast<std::uint16_t>(std::atoi(argv[2]))}; // NOLINT
+        auto const address{net::ip::make_address(argv[1])};
+        auto const port{static_cast<std::uint16_t>(std::atoi(argv[2]))};
         net::ip::tcp::endpoint const endpoint{address, port};
 
         net::io_context io_context;
@@ -451,11 +449,7 @@ int main(int argc, char **argv) {
         std::cout << "Try in a different terminal:\n    telnet " << local_endpoint.address() << " "
                   << local_endpoint.port() << "\n    help<ENTER>" << std::endl;
 
-#ifndef __clang_analyzer__
         auto socket = acceptor.accept();
-#else
-        net::ip::tcp::socket socket{io_context};
-#endif
         std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
 
         // Start the `async_demo_rpc` operation and wait for its completion.
