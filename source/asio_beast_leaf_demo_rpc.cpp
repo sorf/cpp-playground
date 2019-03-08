@@ -1,4 +1,12 @@
 // Example of a composed asynchronous operation which uses the LEAF library for error handling and reporting.
+//
+// An example of running:
+// - in one terminal: ./asio_beast_leaf_demo_rpc.exe 0.0.0.0 8080
+// - in another: telnet localhost 8080
+//      sum 0 1 2 3
+//      div 1 0
+//      mod 1
+//      quit
 #include <algorithm>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/erase.hpp>
@@ -34,22 +42,153 @@ namespace {
 
 using error_code = boost::system::error_code;
 
-// A bare-bones on-scope-exit utility.
-template <typename F> struct [[nodiscard]] scope_exit {
-    explicit scope_exit(F && f) : m_f(std::move(f)) {}
-    scope_exit(scope_exit const &) = delete;
-    scope_exit(scope_exit &&) = delete;
-    scope_exit &operator=(scope_exit const &) = delete;
-    scope_exit &operator=(scope_exit &&) = delete;
-    ~scope_exit() { m_f(); }
-    F const m_f;
-};
-template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
+template <typename CharRange> leaf::result<std::pair<std::string, bool>> execute_command(CharRange const &line);
+template <typename CharRange> decltype(auto) make_execute_command_error_handler_all();
+
+// A composed asynchronous operation that implements a basic remote calculator.
+// It receives from the remote side commands such as:
+//      sum 1 2 3
+//      div 3 2
+//      mod 1 0
+// and then sends back the result.
+//
+// From the error handling perspective there are three parts of the implementation which are more or less decoupled:
+// - the execution of the command we receive which knows of the error conditions this can lead to
+//      (see execute_command())
+// - the handling of these error condtions by constructing a response message suitable to be sent to the remote side
+//      (see make_execute_command_error_handler_all())
+// - this composed asynchronous operation which calls them (and sets the actual type for the range of characters
+//      they will use)
+// .
+// It is based on:
+// https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/echo-op/echo_op.cpp#L1
+// https://github.com/chriskohlhoff/asio/blob/e7b397142ae11545ea08fcf04db3008f588b4ce7/asio/src/examples/cpp11/operations/composed_5.cpp
+template <class AsyncStream, class DynamicReadBuffer, class DynamicWriteBuffer, typename CompletionToken>
+auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
+                    CompletionToken &&token) ->
+    typename net::async_result<typename std::decay<CompletionToken>::type, void(error_code)>::return_type {
+
+    static_assert(beast::is_async_stream<AsyncStream>::value, "AsyncStream requirements not met");
+    static_assert(net::is_dynamic_buffer<DynamicReadBuffer>::value, "DynamicBuffer type requirements not met");
+    static_assert(net::is_dynamic_buffer<DynamicWriteBuffer>::value, "DynamicBuffer type requirements not met");
+
+    using read_buffers_type = typename DynamicReadBuffer::const_buffers_type;
+    using read_buffers_iterator = net::buffers_iterator<read_buffers_type>;
+    using read_buffers_range = boost::iterator_range<read_buffers_iterator>;
+    using execute_error_handler_t = decltype(make_execute_command_error_handler_all<read_buffers_range>());
+
+    using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
+    using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
+
+    using handler_type = typename net::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
+    using base_type = beast::async_base<handler_type, beast::executor_type<AsyncStream>>;
+    struct internal_op : base_type {
+        AsyncStream &m_stream;
+        DynamicReadBuffer &m_read_buffer;
+        DynamicWriteBuffer &m_write_buffer;
+        execute_error_handler_t m_execute_error_handler;
+        bool m_write_and_quit;
+
+        internal_op(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
+                    handler_type &&handler)
+            : base_type{std::move(handler), stream.get_executor()}, m_stream{stream}, m_read_buffer{read_buffer},
+              m_write_buffer{write_buffer},
+              m_execute_error_handler{make_execute_command_error_handler_all<read_buffers_range>()}, m_write_and_quit{
+                                                                                                         false} {
+
+            // Simulating that we received an empty line so that we send the "help" message as soon as a client connects
+            using mutable_iterator = net::buffers_iterator<typename DynamicReadBuffer::mutable_buffers_type>;
+            auto b = m_read_buffer.prepare(1);
+            auto i = mutable_iterator::begin(b);
+            [[maybe_unused]] auto end = mutable_iterator::end(b);
+            *i++ = '\n';
+            assert(i == end);
+            (*this)({}, 1, false);
+        }
+
+        void operator()(error_code ec, std::size_t bytes_transferred = 0, bool is_continuation = true) {
+            if (!ec) {
+                if (m_write_buffer.size() == 0) {
+                    // We read something.
+                    m_read_buffer.commit(bytes_transferred);
+                    std::size_t pos_nl = find_newline(m_read_buffer.data());
+                    if (pos_nl == 0) {
+                        // Read some more until we get a newline
+                        return start_read_some();
+                    }
+
+                    // Process the line we received.
+                    auto line_begin = read_buffers_iterator::begin(m_read_buffer.data());
+                    auto line_end = line_begin + pos_nl;
+                    read_buffers_range line{line_begin, line_end};
+                    std::string response = leaf::remote_try_handle_all(
+                        [line, this]() -> leaf::result<std::string> {
+                            LEAF_AUTO(pair_response_quit, execute_command(line));
+                            m_write_and_quit = pair_response_quit.second;
+                            return std::move(pair_response_quit.first);
+                        },
+                        [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
+                    // After processing and/or error handling we can consume the read buffer.
+                    m_read_buffer.consume(pos_nl);
+
+                    // Prepare the response buffer
+                    // (including fixing the newlines to be '\r\n' for remote telnet clients)
+                    response.push_back('\n');
+                    boost::algorithm::erase_all(response, "\r");
+                    boost::algorithm::replace_all(response, "\n", "\r\n");
+
+                    std::size_t write_size = response.size();
+                    auto response_buffers = m_write_buffer.prepare(write_size);
+                    std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
+                    m_write_buffer.commit(write_size);
+                    return net::async_write(m_stream, response_buffers, std::move(*this));
+                }
+
+                // If getting here, we completed a write operation.
+                assert(m_write_buffer.size() == bytes_transferred);
+                m_write_buffer.consume(bytes_transferred);
+                // And start reading a new message if not quitting.
+                if (!m_write_and_quit) {
+                    return start_read_some();
+                }
+            }
+            // Operation complete if we get here.
+            this->complete(is_continuation, ec);
+        }
+
+        void start_read_some() {
+            std::size_t bytes_to_read = 3; // A small value for testing purposes
+                                           // (multiple `operator()` calls for most messages)
+            m_stream.async_read_some(m_read_buffer.prepare(bytes_to_read), std::move(*this));
+        }
+
+        // Same as:
+        // https://github.com/boostorg/beast/blob/c82237512a95487fd67a4287f79f4458ba978f43/example/echo-op/echo_op.cpp#L199
+        static std::size_t find_newline(read_buffers_type const &buffers) {
+            auto begin = read_buffers_iterator::begin(buffers);
+            auto end = read_buffers_iterator::end(buffers);
+            auto result = std::find(begin, end, '\n');
+            if (result == end) {
+                return 0;
+            }
+            return result + 1 - begin;
+        }
+    };
+
+    auto initiation = [](auto &&completion_handler, AsyncStream *stream, DynamicReadBuffer *read_buffer,
+                         DynamicWriteBuffer *write_buffer) {
+        internal_op op{*stream, *read_buffer, *write_buffer,
+                       std::forward<decltype(completion_handler)>(completion_handler)};
+    };
+
+    return net::async_initiate<CompletionToken, void(error_code)>(initiation, token, &stream, &read_buffer,
+                                                                  &write_buffer);
+}
 
 // The location of a int64 parse error.
 // It refers the range of characters from which the parsing was done.
-template <typename Range> struct e_parse_int64_error {
-    using location_base = std::pair<Range const, typename boost::range_iterator<Range>::type>;
+template <typename CharRange> struct e_parse_int64_error {
+    using location_base = std::pair<CharRange const, typename boost::range_iterator<CharRange>::type>;
     struct location : public location_base {
         using location_base::location_base;
 
@@ -72,7 +211,7 @@ template <typename Range> struct e_parse_int64_error {
 };
 
 // Parses an integer from a range of characters.
-template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &word) {
+template <typename CharRange> leaf::result<std::int64_t> parse_int64(CharRange const &word) {
     [[maybe_unused]] auto const begin = boost::begin(word);
     [[maybe_unused]] auto const end = boost::end(word);
     std::int64_t value = 0;
@@ -80,7 +219,7 @@ template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &wo
     auto i = begin;
     bool result = boost::spirit::qi::parse(i, end, boost::spirit::long_long, value);
     if (!result || i != end) {
-        return leaf::new_error(e_parse_int64_error<Range>{std::make_pair(word, i)});
+        return leaf::new_error(e_parse_int64_error<CharRange>{std::make_pair(word, i)});
     }
 #endif
     return value;
@@ -88,7 +227,7 @@ template <typename Range> leaf::result<std::int64_t> parse_int64(Range const &wo
 
 // The command being executed while we get an error.
 // It refers the range of characters from which the command was extracted.
-template <typename Range> struct e_command { Range value; };
+template <typename CharRange> struct e_command { CharRange value; };
 
 // The details about an incorrect number of arguments error
 // Some commands may accept a variable number of arguments (e.g. greater than 1 would mean [2, SIZE_MAX]).
@@ -122,10 +261,10 @@ struct e_error_quit {
 
 // Processes a remote command.
 // Returns the response and a flag indicating this is the last command to execute.
-template <typename Range> leaf::result<std::pair<std::string, bool>> execute_command(Range const &line) {
+template <typename CharRange> leaf::result<std::pair<std::string, bool>> execute_command(CharRange const &line) {
     // Split the command in words.
     // Note that split() doesn't elimintate leading and trailing empty substrings.
-    std::deque<Range> words; // or std::list<Range> words;
+    std::deque<CharRange> words; // or std::list<CharRange> words;
 
     boost::algorithm::split(words, line, boost::is_any_of("\t \r\n"), boost::algorithm::token_compress_on);
     while (!words.empty() && boost::empty(words.front())) {
@@ -152,7 +291,7 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
     auto command = words.front();
     words.pop_front();
 
-    auto load_cmd = leaf::preload(e_command<Range>{command});
+    auto load_cmd = leaf::preload(e_command<CharRange>{command});
     std::string response;
     bool quit = false;
 
@@ -227,9 +366,9 @@ template <typename Range> leaf::result<std::pair<std::string, bool>> execute_com
 // Creates an error handler for errors coming out of `execute_command`.
 // It constructs a response message to send back to the remote client.
 // It uses leaf::remote_handle_all (see https://zajo.github.io/leaf/#remote_try_handle_all)
-template <typename Range> decltype(auto) make_execute_command_error_handler_all() {
-    using e_command_r = e_command<Range>;
-    using e_parse_int64_error_r = e_parse_int64_error<Range>;
+template <typename CharRange> decltype(auto) make_execute_command_error_handler_all() {
+    using e_command_r = e_command<CharRange>;
+    using e_parse_int64_error_r = e_parse_int64_error<CharRange>;
 
     auto e_prefix = [](e_command_r const *cmd) {
         if (cmd != nullptr) {
@@ -262,139 +401,17 @@ template <typename Range> decltype(auto) make_execute_command_error_handler_all(
     };
 }
 
-// A composed asynchronous operation that implements a basic remote calculator.
-// It receives from the remote side commands such as:
-//      sum 1 2 3
-//      div 3 2
-//      mod 1 0
-// and then sends back the result.
-//
-// It is based on:
-// https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/echo-op/echo_op.cpp#L1
-// https://github.com/chriskohlhoff/asio/blob/e7b397142ae11545ea08fcf04db3008f588b4ce7/asio/src/examples/cpp11/operations/composed_5.cpp
-template <class AsyncStream, class DynamicReadBuffer, class DynamicWriteBuffer, typename CompletionToken>
-auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
-                    CompletionToken &&token) ->
-    typename net::async_result<typename std::decay<CompletionToken>::type, void(error_code)>::return_type {
-
-    static_assert(beast::is_async_stream<AsyncStream>::value, "AsyncStream requirements not met");
-    static_assert(net::is_dynamic_buffer<DynamicReadBuffer>::value, "DynamicBuffer type requirements not met");
-    static_assert(net::is_dynamic_buffer<DynamicWriteBuffer>::value, "DynamicBuffer type requirements not met");
-
-    using read_buffers_type = typename DynamicReadBuffer::const_buffers_type;
-    using read_buffers_iterator = net::buffers_iterator<read_buffers_type>;
-    using read_buffers_range = boost::iterator_range<read_buffers_iterator>;
-    using execute_error_handler_t = decltype(make_execute_command_error_handler_all<read_buffers_range>());
-
-    using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
-    using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
-
-    using handler_type = typename net::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
-    using base_type = beast::async_base<handler_type, beast::executor_type<AsyncStream>>;
-    struct internal_op : base_type {
-        AsyncStream &m_stream;
-        DynamicReadBuffer &m_read_buffer;
-        DynamicWriteBuffer &m_write_buffer;
-        execute_error_handler_t m_execute_error_handler;
-        bool m_write_and_quit;
-
-        internal_op(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
-                    handler_type &&handler)
-            : base_type{std::move(handler), stream.get_executor()}, m_stream{stream}, m_read_buffer{read_buffer},
-              m_write_buffer{write_buffer},
-              m_execute_error_handler{make_execute_command_error_handler_all<read_buffers_range>()}, m_write_and_quit{
-                                                                                                         false} {
-
-            // Simulating that we received an empty line so that we send the "help" message as soon as a client connects
-            using mutable_iterator = net::buffers_iterator<typename DynamicReadBuffer::mutable_buffers_type>;
-            auto b = m_read_buffer.prepare(1);
-            auto i = mutable_iterator::begin(b);
-            [[maybe_unused]] auto end = mutable_iterator::end(b);
-            *i++ = '\n';
-            assert(i == end);
-            (*this)({}, 1, false);
-        }
-
-        void operator()(error_code ec, std::size_t bytes_transferred = 0, bool is_continuation = true) {
-            if (!ec) {
-                if (m_write_buffer.size() == 0) {
-                    // We read something.
-                    m_read_buffer.commit(bytes_transferred);
-                    std::size_t pos_nl = find_newline(m_read_buffer.data());
-                    if (pos_nl == 0) {
-                        // Read some more until we get a newline
-                        return start_read_some();
-                    }
-
-                    // Process the line we received.
-                    auto line_begin = read_buffers_iterator::begin(m_read_buffer.data());
-                    auto line_end = line_begin + pos_nl;
-                    read_buffers_range line{line_begin, line_end};
-                    std::string response = leaf::remote_try_handle_all(
-                        [line, this]() -> leaf::result<std::string> {
-                            LEAF_AUTO(pair_response_quit, execute_command(line));
-                            m_write_and_quit = pair_response_quit.second;
-                            return std::move(pair_response_quit.first);
-                        },
-                        [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
-                    // After processing and/or error handling we can consume the read buffer.
-                    m_read_buffer.consume(pos_nl);
-
-                    // Prepare the response buffer
-                    // (including fixing the newlines to be '\r\n' for remote telnet clients)
-                    if (response.empty() || response.back() != '\n') {
-                        response.push_back('\n');
-                    }
-                    boost::algorithm::erase_all(response, "\r");
-                    boost::algorithm::replace_all(response, "\n", "\r\n");
-
-                    std::size_t write_size = response.size();
-                    auto response_buffers = m_write_buffer.prepare(write_size);
-                    std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
-                    m_write_buffer.commit(write_size);
-                    return net::async_write(m_stream, response_buffers, std::move(*this));
-                }
-
-                // If getting here, we completed a write operation.
-                assert(m_write_buffer.size() == bytes_transferred);
-                m_write_buffer.consume(bytes_transferred);
-                // And start reading a new message if not quitting.
-                if (!m_write_and_quit) {
-                    return start_read_some();
-                }
-            }
-            // Operation complete if we get here.
-            this->complete(is_continuation, ec);
-        }
-
-        void start_read_some() {
-            std::size_t bytes_to_read = 3; // A small value for testing purposes
-                                           // (multiple `operator()` calls for most messages)
-            m_stream.async_read_some(m_read_buffer.prepare(bytes_to_read), std::move(*this));
-        }
-
-        // Same as:
-        // https://github.com/boostorg/beast/blob/c82237512a95487fd67a4287f79f4458ba978f43/example/echo-op/echo_op.cpp#L199
-        static std::size_t find_newline(read_buffers_type const &buffers) {
-            auto begin = read_buffers_iterator::begin(buffers);
-            auto end = read_buffers_iterator::end(buffers);
-            auto result = std::find(begin, end, '\n');
-            if (result == end) {
-                return 0;
-            }
-            return result + 1 - begin;
-        }
-    };
-
-    auto initiation = [](auto &&completion_handler, AsyncStream *stream, DynamicReadBuffer *read_buffer,
-                         DynamicWriteBuffer *write_buffer) {
-        internal_op op{*stream, *read_buffer, *write_buffer,
-                       std::forward<decltype(completion_handler)>(completion_handler)};
-    };
-
-    return net::async_initiate<CompletionToken, void(error_code)>(initiation, token, &stream, &read_buffer,
-                                                                  &write_buffer);
-}
+// A bare-bones on-scope-exit utility.
+template <typename F> struct [[nodiscard]] scope_exit {
+    explicit scope_exit(F && f) : m_f(std::move(f)) {}
+    scope_exit(scope_exit const &) = delete;
+    scope_exit(scope_exit &&) = delete;
+    scope_exit &operator=(scope_exit const &) = delete;
+    scope_exit &operator=(scope_exit &&) = delete;
+    ~scope_exit() { m_f(); }
+    F const m_f;
+};
+template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
 
 } // namespace
 
