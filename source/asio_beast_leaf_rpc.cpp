@@ -1,7 +1,7 @@
 // Example of a composed asynchronous operation which uses the LEAF library for error handling and reporting.
 //
 // An example of running:
-// - in one terminal: ./asio_beast_leaf_demo_rpc.exe 0.0.0.0 8080
+// - in one terminal: ./asio_beast_leaf_rpc.exe 0.0.0.0 8080
 // - in another: telnet localhost 8080
 //      sum 0 1 2 3
 //      div 1 0
@@ -47,10 +47,15 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
 
 // A composed asynchronous operation that implements a basic remote calculator.
 // It receives from the remote side commands such as:
-//      sum 1 2 3
-//      div 3 2
-//      mod 1 0
+//      sum 1 2 3 \n
+//      div 3 2 \n
+//      mod 1 0 \n
 // and then sends back the result.
+//
+// Besides the calculator related commands, it also offer two special ones:
+// - `quit` that asks the server to initiate the graceful shutdown of the connection
+// - `error_quit` that asks the server to simulate a server side error that leads to the connection being dropped
+// .
 //
 // From the error handling perspective there are three parts of the implementation which are more or less decoupled:
 // - the execution of the command we receive which knows of the error conditions this can lead to
@@ -60,7 +65,12 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
 // - this composed asynchronous operation which calls them (and sets the actual type for the range of characters
 //      they will use)
 // .
-// It is based on:
+//
+// The operation shows a possible way of parsing the received command lines from the receive buffer(s) without the need
+// to copy them to a contiguous memory area. That means the execution of the commands and the error conditions related
+// to them are expressed in terms of character-ranges in the receive buffer(s).
+//
+// This example operation is based on:
 // https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/echo-op/echo_op.cpp#L1
 // https://github.com/chriskohlhoff/asio/blob/e7b397142ae11545ea08fcf04db3008f588b4ce7/asio/src/examples/cpp11/operations/composed_5.cpp
 template <class AsyncStream, class DynamicReadBuffer, class DynamicWriteBuffer, typename CompletionToken>
@@ -252,6 +262,7 @@ struct e_unexpected_arg_count {
     arg_info value;
 };
 
+// The E-type that describes the `error_quit` command as an error condition.
 struct e_error_quit {
     struct none_t {};
     none_t value;
@@ -382,7 +393,15 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
 
     return [e_prefix, diag_s](leaf::error_info const &error) {
         return leaf::remote_handle_all(
-            error, [](e_error_quit const &) -> std::string { throw std::runtime_error("error_quit"); },
+            error,
+            // For the `error_quit` command and associated error condition we have the error handler itself fail
+            // (by throwing). This means that the server will not send any response to the client, it will just
+            // shutdown the connection.
+            // This implementation showcases two aspects:
+            // - that the implementation of error handling can fail, too
+            // - how the asynchronous operation calling this error handling function reacts to this failure.
+            [](e_error_quit const &) -> std::string { throw std::runtime_error("error_quit"); },
+            // For the rest of error conditions we just build a message to be sent to the remote client.
             [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
                 return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) + diag_s(diag);
             },
