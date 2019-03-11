@@ -433,61 +433,57 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 } // namespace
 
 int main(int argc, char **argv) {
-    try {
-        if (argc != 3) {
-            std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;
-            std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl;
-            return -1;
-        }
-
-        auto const address{net::ip::make_address(argv[1])};
-        auto const port{static_cast<std::uint16_t>(std::atoi(argv[2]))};
-        net::ip::tcp::endpoint const endpoint{address, port};
-
-        net::io_context io_context;
-
-        // Set up a worker thread that runs the io_context in background.
-        auto threads_io_work = net::make_work_guard(io_context);
-        std::thread thread_io_context{[&io_context] {
-            try {
-                io_context.run();
-            } catch (std::exception const &e) {
-                std::cerr << "Server-thread error: " << e.what() << std::endl;
-            }
-        }};
-        // And our cleanup work at the end of the scope to stop this thread.
-        auto cleanup = on_scope_exit([&] {
-            threads_io_work.reset();
-            thread_io_context.join();
-        });
-
-        // Start the server acceptor and wait for a client.
-        net::ip::tcp::acceptor acceptor{io_context, endpoint};
-        auto local_endpoint = acceptor.local_endpoint();
-        std::cout << "Server: Started on: " << local_endpoint << std::endl;
-        std::cout << "Try in a different terminal:\n    telnet " << local_endpoint.address() << " "
-                  << local_endpoint.port() << "\n    help<ENTER>" << std::endl;
-
-        auto socket = acceptor.accept();
-        std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
-
-        // Start the `async_demo_rpc` operation and wait for its completion.
-        beast::multi_buffer read_buffer; // or beast::flat_buffer read_buffer;
-        beast::flat_buffer write_buffer;
-        std::future<void> f = async_demo_rpc(socket, read_buffer, write_buffer, net::use_future);
-        try {
-            f.get();
-            std::cout << "Server: Client work completed successfully" << std::endl;
-        } catch (std::exception const &e) {
-            std::cout << "Server: Client work completed with error: " << e.what() << std::endl;
-        }
-
-        // Let the remote side know we are shutting down.
-        error_code ignored;
-        socket.shutdown(net::ip::tcp::socket::shutdown_both, ignored);
-
-    } catch (std::exception const &e) {
-        std::cerr << "Server error: " << e.what() << std::endl;
+    if (argc != 3) {
+        std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;
+        std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl;
+        return -1;
     }
+
+    auto const address{net::ip::make_address(argv[1])};
+    auto const port{static_cast<std::uint16_t>(std::atoi(argv[2]))};
+    net::ip::tcp::endpoint const endpoint{address, port};
+
+    net::io_context io_context;
+
+    // Set up a worker thread that runs the io_context in background.
+    auto threads_io_work = net::make_work_guard(io_context);
+    std::thread thread_io_context{[&io_context] {
+        try {
+            io_context.run();
+        } catch (std::exception const &e) {
+            std::cerr << "Server-thread error: " << e.what() << std::endl;
+        }
+    }};
+    // And our cleanup work at the end of the scope to stop this thread.
+    auto cleanup = on_scope_exit([&] {
+        threads_io_work.reset();
+        thread_io_context.join();
+    });
+
+    // Start the server acceptor and wait for a client.
+    net::ip::tcp::acceptor acceptor{io_context, endpoint};
+    auto local_endpoint = acceptor.local_endpoint();
+    std::cout << "Server: Started on: " << local_endpoint << std::endl;
+    std::cout << "Try in a different terminal:\n    telnet " << local_endpoint.address() << " "
+                << local_endpoint.port() << "\n    help<ENTER>" << std::endl;
+
+    auto socket = acceptor.accept();
+    std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
+
+    // Start the `async_demo_rpc` operation and wait for its completion.
+    beast::multi_buffer read_buffer; // or beast::flat_buffer read_buffer;
+    beast::flat_buffer write_buffer;
+    std::future<void> f = async_demo_rpc(socket, read_buffer, write_buffer, net::use_future);
+    try {
+        f.get();
+        std::cout << "Server: Client work completed successfully" << std::endl;
+    } catch (std::exception const &e) {
+        std::cout << "Server: Client work completed with error: " << e.what() << std::endl;
+    }
+
+    // Let the remote side know we are shutting down.
+    error_code ignored;
+    socket.shutdown(net::ip::tcp::socket::shutdown_both, ignored);
+
     return 0;
 }
