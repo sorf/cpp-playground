@@ -155,8 +155,9 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
             std::optional<preload_last_operation_t> load_last_operation;
 
             if (is_continuation) {
-                // Only as a continuation (not called directly from the initiation function)
-                // we can safely reactivate the context.
+                // We activate the error-context only as a continuation (when this method is not called directly from
+                // the initiation function). Otherwise (during initiation) we let the caller's error context be
+                // associated with any error that might occur below.
                 active_context.emplace(m_error_context, leaf::on_deactivation::do_not_propagate);
 
                 // Also, only as a continuation we preload the "continuation" operation
