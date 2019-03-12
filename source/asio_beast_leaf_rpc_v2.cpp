@@ -1,12 +1,25 @@
 // Example of a composed asynchronous operation which uses the LEAF library for error handling and reporting.
 //
 // An example of running:
-// - in one terminal: ./asio_beast_leaf_rpc 0.0.0.0 8080
+// - in one terminal: ./asio_beast_leaf_rpc_v2 0.0.0.0 8080
 // - in another: telnet localhost 8080
 //      sum 0 1 2 3
 //      div 1 0
 //      mod 1
 //      quit
+//
+// Examples of runs that showcase the error handling:
+//  - error starting the server:
+//      ./asio_beast_leaf_rpc_v2 0.0.0.0 80
+//  - client disconnecting abruptly:
+//      ./asio_beast_leaf_rpc_v2 0.0.0.0 8080
+//      telnet localhost 8080
+//      <kill telnet>
+//  - error while running the server logic:
+//      ./asio_beast_leaf_rpc_v2 0.0.0.0 8080
+//      telnet localhost 8080
+//          error-quit
+//
 #include <algorithm>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/erase.hpp>
@@ -17,7 +30,6 @@
 #include <boost/asio/buffers_iterator.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core/async_base.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
@@ -32,16 +44,22 @@
 #include <list>
 #include <optional>
 #include <string>
-#include <thread>
 
 namespace beast = boost::beast;
 namespace leaf = boost::leaf;
 namespace net = boost::asio;
 
 namespace {
-
 using error_code = boost::system::error_code;
+} // namespace
 
+namespace boost {
+namespace leaf {
+template <> struct is_e_type<error_code> : std::true_type {};
+} // namespace leaf
+} // namespace boost
+
+namespace {
 template <typename CharRange> leaf::result<std::pair<std::string, bool>> execute_command(CharRange const &line);
 template <typename CharRange> decltype(auto) make_execute_command_error_handler_all();
 
@@ -73,10 +91,11 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
 // This example operation is based on:
 // https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/echo-op/echo_op.cpp#L1
 // https://github.com/chriskohlhoff/asio/blob/e7b397142ae11545ea08fcf04db3008f588b4ce7/asio/src/examples/cpp11/operations/composed_5.cpp
-template <class AsyncStream, class DynamicReadBuffer, class DynamicWriteBuffer, typename CompletionToken>
+template <class AsyncStream, class DynamicReadBuffer, class DynamicWriteBuffer, typename ErrorContext,
+          typename CompletionToken>
 auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
-                    CompletionToken &&token) ->
-    typename net::async_result<typename std::decay<CompletionToken>::type, void(error_code)>::return_type {
+                    ErrorContext &error_context, CompletionToken &&token) ->
+    typename net::async_result<typename std::decay<CompletionToken>::type, void(leaf::result<void>)>::return_type {
 
     static_assert(beast::is_async_stream<AsyncStream>::value, "AsyncStream requirements not met");
     static_assert(net::is_dynamic_buffer<DynamicReadBuffer>::value, "DynamicBuffer type requirements not met");
@@ -90,19 +109,21 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
     using write_buffers_type = typename DynamicWriteBuffer::mutable_buffers_type;
     using write_buffers_iterator = net::buffers_iterator<write_buffers_type>;
 
-    using handler_type = typename net::async_completion<CompletionToken, void(error_code)>::completion_handler_type;
+    using handler_type =
+        typename net::async_completion<CompletionToken, void(leaf::result<void>)>::completion_handler_type;
     using base_type = beast::async_base<handler_type, beast::executor_type<AsyncStream>>;
     struct internal_op : base_type {
         AsyncStream &m_stream;
         DynamicReadBuffer &m_read_buffer;
         DynamicWriteBuffer &m_write_buffer;
+        ErrorContext &m_error_context;
         execute_error_handler_t m_execute_error_handler;
         bool m_write_and_quit;
 
         internal_op(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
-                    handler_type &&handler)
+                    ErrorContext &error_context, handler_type &&handler)
             : base_type{std::move(handler), stream.get_executor()}, m_stream{stream}, m_read_buffer{read_buffer},
-              m_write_buffer{write_buffer},
+              m_write_buffer{write_buffer}, m_error_context{error_context},
               m_execute_error_handler{make_execute_command_error_handler_all<read_buffers_range>()}, m_write_and_quit{
                                                                                                          false} {
 
@@ -117,7 +138,11 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         }
 
         void operator()(error_code ec, std::size_t bytes_transferred = 0, bool is_continuation = true) {
+            // TODO:  Assertion `!is_active()' failed.
+            // leaf::context_activator active_context(m_error_context, leaf::on_deactivation::do_not_propagate);
+            leaf::result<void> result;
             if (!ec) {
+                // TODO: Convert any exception from this scope to the result.
                 if (m_write_buffer.size() == 0) {
                     // We read something.
                     m_read_buffer.commit(bytes_transferred);
@@ -161,9 +186,12 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                 if (!m_write_and_quit) {
                     return start_read_some();
                 }
+            } else {
+                result = leaf::new_error(ec);
             }
+
             // Operation complete if we get here.
-            this->complete(is_continuation, ec);
+            this->complete(is_continuation, result);
         }
 
         void start_read_some() {
@@ -177,22 +205,22 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         static std::size_t find_newline(read_buffers_type const &buffers) {
             auto begin = read_buffers_iterator::begin(buffers);
             auto end = read_buffers_iterator::end(buffers);
-            auto result = std::find(begin, end, '\n');
-            if (result == end) {
+            auto pos_nl = std::find(begin, end, '\n');
+            if (pos_nl == end) {
                 return 0;
             }
-            return result + 1 - begin;
+            return pos_nl + 1 - begin;
         }
     };
 
     auto initiation = [](auto &&completion_handler, AsyncStream *stream, DynamicReadBuffer *read_buffer,
-                         DynamicWriteBuffer *write_buffer) {
-        internal_op op{*stream, *read_buffer, *write_buffer,
+                         DynamicWriteBuffer *write_buffer, ErrorContext *error_context) {
+        internal_op op{*stream, *read_buffer, *write_buffer, *error_context,
                        std::forward<decltype(completion_handler)>(completion_handler)};
     };
 
-    return net::async_initiate<CompletionToken, void(error_code)>(initiation, token, &stream, &read_buffer,
-                                                                  &write_buffer);
+    return net::async_initiate<CompletionToken, void(leaf::result<void>)>(initiation, token, &stream, &read_buffer,
+                                                                          &write_buffer, &error_context);
 }
 
 // The location of a int64 parse error.
@@ -372,6 +400,12 @@ template <typename CharRange> leaf::result<std::pair<std::string, bool>> execute
     return std::make_pair(response, quit);
 }
 
+std::string diagnostic_to_str(leaf::verbose_diagnostic_info const &diag) {
+    auto str = boost::str(boost::format("%1%") % diag);
+    boost::algorithm::replace_all(str, "\n", "\n    ");
+    return "\nDetailed error diagnostic:\n----\n" + str + "\n----";
+};
+
 // Creates an error handler for errors coming out of `execute_command`.
 // It constructs a response message to send back to the remote client.
 // It uses leaf::remote_handle_all (see https://zajo.github.io/leaf/#remote_try_handle_all)
@@ -385,13 +419,8 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
         }
         return std::string("Error:");
     };
-    auto diag_s = [](leaf::verbose_diagnostic_info const &diag) {
-        auto str = boost::str(boost::format("%1%") % diag);
-        boost::algorithm::replace_all(str, "\n", "\n    ");
-        return "\nDetailed error diagnostic:\n----\n" + str + "\n----";
-    };
 
-    return [e_prefix, diag_s](leaf::error_info const &error) {
+    return [e_prefix](leaf::error_info const &error) {
         return leaf::remote_handle_all(
             error,
             // For the `error_quit` command and associated error condition we have the error handler itself fail
@@ -403,17 +432,19 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
             [](e_error_quit const &) -> std::string { throw std::runtime_error("error_quit"); },
             // For the rest of error conditions we just build a message to be sent to the remote client.
             [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) + diag_s(diag);
+                return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) +
+                       diagnostic_to_str(diag);
             },
             [&](e_unexpected_arg_count const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
                 return boost::str(boost::format("%1% wrong argument count: %2%") % e_prefix(cmd) % e.value) +
-                       diag_s(diag);
+                       diagnostic_to_str(diag);
             },
             [&](leaf::catch_<std::exception> e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% %2%") % e_prefix(cmd) % e.value().what()) + diag_s(diag);
+                return boost::str(boost::format("%1% %2%") % e_prefix(cmd) % e.value().what()) +
+                       diagnostic_to_str(diag);
             },
             [&](e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% unknown failure") % e_prefix(cmd)) + diag_s(diag);
+                return boost::str(boost::format("%1% unknown failure") % e_prefix(cmd)) + diagnostic_to_str(diag);
             });
     };
 }
@@ -433,57 +464,79 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;
-        std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl;
+    auto error_handler_impl = [&](leaf::verbose_diagnostic_info const &diag) -> int {
+        std::cout << "Error: " << diagnostic_to_str(diag) << std::endl;
         return -1;
-    }
+    };
 
-    auto const address{net::ip::make_address(argv[1])};
-    auto const port{static_cast<std::uint16_t>(std::atoi(argv[2]))};
-    net::ip::tcp::endpoint const endpoint{address, port};
+    auto error_handler = [&](leaf::error_info const &error) {
+        return leaf::remote_handle_all(
+            error,
+            [&](std::exception_ptr const &ep) {
+                return leaf::try_handle_all(
+                    [&]() -> leaf::result<int> { std::rethrow_exception(ep); },
+                    [&](leaf::catch_<std::exception>, leaf::verbose_diagnostic_info const &diag) {
+                        return error_handler_impl(diag);
+                    },
+                    [&](leaf::verbose_diagnostic_info const &diag) { return error_handler_impl(diag); });
+            },
+            [&](leaf::catch_<std::exception>, leaf::verbose_diagnostic_info const &diag) {
+                return error_handler_impl(diag);
+            },
+            [&](error_code const &, leaf::verbose_diagnostic_info const &diag) { return error_handler_impl(diag); },
+            [&](leaf::verbose_diagnostic_info const &diag) { return error_handler_impl(diag); });
+    };
 
-    net::io_context io_context;
+    // Top level try block and error handler.
+    // It will handle errors from starting the server for example failure to bind to a given port
+    // (e.g. ports less than 1024 if not running as root)
+    return leaf::remote_try_handle_all(
+        [&]() -> leaf::result<int> {
+            if (argc != 3) {
+                std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;
+                std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl;
+                return -1;
+            }
 
-    // Set up a worker thread that runs the io_context in background.
-    auto threads_io_work = net::make_work_guard(io_context);
-    std::thread thread_io_context{[&io_context] {
-        try {
+            auto const address{net::ip::make_address(argv[1])};
+            auto const port{static_cast<std::uint16_t>(std::atoi(argv[2]))};
+            net::ip::tcp::endpoint const endpoint{address, port};
+
+            net::io_context io_context;
+
+            // Start the server acceptor and wait for a client.
+            net::ip::tcp::acceptor acceptor{io_context, endpoint};
+            auto local_endpoint = acceptor.local_endpoint();
+            std::cout << "Server: Started on: " << local_endpoint << std::endl;
+            std::cout << "Try in a different terminal:\n    telnet " << local_endpoint.address() << " "
+                      << local_endpoint.port() << "\n    help<ENTER>" << std::endl;
+
+            auto socket = acceptor.accept();
+            std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
+
+            // Start the `async_demo_rpc` operation and wait for its completion.
+            beast::multi_buffer read_buffer; // or beast::flat_buffer read_buffer;
+            beast::flat_buffer write_buffer;
+
+            int rv = 0;
+            auto error_context = leaf::make_context(&error_handler);
+            async_demo_rpc(socket, read_buffer, write_buffer, error_context, [&](leaf::result<void> result) {
+                // Handle errors from running the server logic (e.g. client disconnecting abruptly)
+                leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
+                if (result) {
+                    std::cout << "Server: Client work completed successfully" << std::endl;
+                    rv = 0;
+                } else {
+                    leaf::result<int> result_int{result.error()};
+                    rv = error_context.remote_handle_all(
+                        result_int, [&](leaf::error_info const &error) { return error_handler(error); });
+                }
+            });
             io_context.run();
-        } catch (std::exception const &e) {
-            std::cerr << "Server-thread error: " << e.what() << std::endl;
-        }
-    }};
-    // And our cleanup work at the end of the scope to stop this thread.
-    auto cleanup = on_scope_exit([&] {
-        threads_io_work.reset();
-        thread_io_context.join();
-    });
 
-    // Start the server acceptor and wait for a client.
-    net::ip::tcp::acceptor acceptor{io_context, endpoint};
-    auto local_endpoint = acceptor.local_endpoint();
-    std::cout << "Server: Started on: " << local_endpoint << std::endl;
-    std::cout << "Try in a different terminal:\n    telnet " << local_endpoint.address() << " " << local_endpoint.port()
-              << "\n    help<ENTER>" << std::endl;
-
-    auto socket = acceptor.accept();
-    std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
-
-    // Start the `async_demo_rpc` operation and wait for its completion.
-    beast::multi_buffer read_buffer; // or beast::flat_buffer read_buffer;
-    beast::flat_buffer write_buffer;
-    std::future<void> f = async_demo_rpc(socket, read_buffer, write_buffer, net::use_future);
-    try {
-        f.get();
-        std::cout << "Server: Client work completed successfully" << std::endl;
-    } catch (std::exception const &e) {
-        std::cout << "Server: Client work completed with error: " << e.what() << std::endl;
-    }
-
-    // Let the remote side know we are shutting down.
-    error_code ignored;
-    socket.shutdown(net::ip::tcp::socket::shutdown_both, ignored);
-
-    return 0;
+            error_code ignored;
+            socket.shutdown(net::ip::tcp::socket::shutdown_both, ignored);
+            return rv;
+        },
+        [&](leaf::error_info const &error) { return error_handler(error); });
 }

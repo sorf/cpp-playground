@@ -44,12 +44,14 @@ set(TESTS
     asio_echo_server;
     leaf_context_activate_test;
     leaf_info_stack_test;
-    #asio_beast_leaf_demo_rpc;
+    #asio_beast_leaf_rpc;
+    #asio_beast_leaf_rpc_v2;
     )
 
 set(TESTS_NO_CLANG_TIDY
     asio_composed_one_flow_async_op;
-    asio_beast_leaf_demo_rpc)
+    asio_beast_leaf_rpc;
+    asio_beast_leaf_rpc_v2)
 
 foreach(test_name ${TESTS})
     define_test_executable(${test_name} ${test_name}.cpp)
@@ -63,5 +65,6 @@ target_include_directories(asio_composed_one_flow_async_op SYSTEM PRIVATE tmp/in
 target_include_directories(asio_composed_one_flow_compose SYSTEM PRIVATE tmp/include)
 target_include_directories(leaf_context_activate_test SYSTEM PRIVATE tmp/include)
 target_include_directories(leaf_info_stack_test SYSTEM PRIVATE tmp/include)
-target_include_directories(asio_beast_leaf_demo_rpc SYSTEM PRIVATE tmp/include)
+target_include_directories(asio_beast_leaf_rpc SYSTEM PRIVATE tmp/include)
+target_include_directories(asio_beast_leaf_rpc_v2 SYSTEM PRIVATE tmp/include)
 
