@@ -19,6 +19,8 @@
 //      ./asio_beast_leaf_rpc_v2 0.0.0.0 8080
 //      telnet localhost 8080
 //          error-quit
+//   - commented out failures while initiating the async operation
+//      grep for "initiation failed" below
 //
 #include <algorithm>
 #include <boost/algorithm/string/classification.hpp>
@@ -55,9 +57,17 @@ using error_code = boost::system::error_code;
 
 namespace boost {
 namespace leaf {
+// Ensure the error_code is an E-type.
 template <> struct is_e_type<error_code> : std::true_type {};
 } // namespace leaf
 } // namespace boost
+
+// The operation being performed when an error occurs.
+struct e_last_operation {
+    std::string_view value;
+};
+// And the type leaf::preload() returns for it.
+using preload_last_operation_t = std::decay_t<decltype(leaf::preload(e_last_operation{""}))>;
 
 namespace {
 template <typename CharRange> leaf::result<std::pair<std::string, bool>> execute_command(CharRange const &line);
@@ -127,6 +137,8 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
               m_execute_error_handler{make_execute_command_error_handler_all<read_buffers_range>()}, m_write_and_quit{
                                                                                                          false} {
 
+            // throw std::runtime_error{"initiation failed - 2"};
+
             // Simulating that we received an empty line so that we send the "help" message as soon as a client connects
             using mutable_iterator = net::buffers_iterator<typename DynamicReadBuffer::mutable_buffers_type>;
             auto b = m_read_buffer.prepare(1);
@@ -138,60 +150,84 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         }
 
         void operator()(error_code ec, std::size_t bytes_transferred = 0, bool is_continuation = true) {
-            // TODO:  Assertion `!is_active()' failed.
-            // leaf::context_activator active_context(m_error_context, leaf::on_deactivation::do_not_propagate);
-            leaf::result<void> result;
-            if (!ec) {
-                // TODO: Convert any exception from this scope to the result.
-                if (m_write_buffer.size() == 0) {
-                    // We read something.
-                    m_read_buffer.commit(bytes_transferred);
-                    std::size_t pos_nl = find_newline(m_read_buffer.data());
-                    if (pos_nl == 0) {
-                        // Read some more until we get a newline
-                        return start_read_some();
-                    }
+            leaf::result<bool> result_continue;
+            std::optional<leaf::context_activator> active_context;
+            std::optional<preload_last_operation_t> load_last_operation;
 
-                    // Process the line we received.
-                    auto line_begin = read_buffers_iterator::begin(m_read_buffer.data());
-                    auto line_end = line_begin + pos_nl;
-                    read_buffers_range line{line_begin, line_end};
-                    std::string response = leaf::remote_try_handle_all(
-                        [line, this]() -> leaf::result<std::string> {
-                            LEAF_AUTO(pair_response_quit, execute_command(line));
-                            m_write_and_quit = pair_response_quit.second;
-                            return std::move(pair_response_quit.first);
-                        },
-                        [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
-                    // After processing and/or error handling we can consume the read buffer.
-                    m_read_buffer.consume(pos_nl);
+            if (is_continuation) {
+                // Only as a continuation (not called directly from the initiation function)
+                // we can safely reactivate the context.
+                active_context.emplace(m_error_context, leaf::on_deactivation::do_not_propagate);
 
-                    // Prepare the response buffer
-                    // (including fixing the newlines to be '\r\n' for remote telnet clients)
-                    response.push_back('\n');
-                    boost::algorithm::erase_all(response, "\r");
-                    boost::algorithm::replace_all(response, "\n", "\r\n");
-
-                    std::size_t write_size = response.size();
-                    auto response_buffers = m_write_buffer.prepare(write_size);
-                    std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
-                    m_write_buffer.commit(write_size);
-                    return net::async_write(m_stream, response_buffers, std::move(*this));
-                }
-
-                // If getting here, we completed a write operation.
-                assert(m_write_buffer.size() == bytes_transferred);
-                m_write_buffer.consume(bytes_transferred);
-                // And start reading a new message if not quitting.
-                if (!m_write_and_quit) {
-                    return start_read_some();
-                }
-            } else {
-                result = leaf::new_error(ec);
+                // Also, only as a continuation we preload the "continuation" operation
+                load_last_operation.emplace(leaf::preload(e_last_operation{"async_demo_rpc::continuation"}));
             }
 
-            // Operation complete if we get here.
-            this->complete(is_continuation, result);
+            if (ec) {
+                result_continue = leaf::new_error(ec);
+            } else {
+                result_continue = leaf::exception_to_result([&]() -> leaf::result<bool> {
+                    if (m_write_buffer.size() == 0) {
+                        // We read something.
+                        m_read_buffer.commit(bytes_transferred);
+                        std::size_t pos_nl = find_newline(m_read_buffer.data());
+                        if (pos_nl == 0) {
+                            // Read some more until we get a newline
+                            start_read_some();
+                            return true;
+                        }
+
+                        // Process the line we received.
+                        auto line_begin = read_buffers_iterator::begin(m_read_buffer.data());
+                        auto line_end = line_begin + pos_nl;
+                        read_buffers_range line{line_begin, line_end};
+                        std::string response = leaf::remote_try_handle_all(
+                            [line, this]() -> leaf::result<std::string> {
+                                LEAF_AUTO(pair_response_quit, execute_command(line));
+                                m_write_and_quit = pair_response_quit.second;
+                                return std::move(pair_response_quit.first);
+                            },
+                            [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
+                        // After processing and/or error handling we can consume the read buffer.
+                        m_read_buffer.consume(pos_nl);
+
+                        // Prepare the response buffer
+                        // (including fixing the newlines to be '\r\n' for remote telnet clients)
+                        response.push_back('\n');
+                        boost::algorithm::erase_all(response, "\r");
+                        boost::algorithm::replace_all(response, "\n", "\r\n");
+
+                        std::size_t write_size = response.size();
+                        auto response_buffers = m_write_buffer.prepare(write_size);
+                        std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
+                        m_write_buffer.commit(write_size);
+                        net::async_write(m_stream, response_buffers, std::move(*this));
+                        return true;
+                    }
+
+                    // If getting here, we completed a write operation.
+                    assert(m_write_buffer.size() == bytes_transferred);
+                    m_write_buffer.consume(bytes_transferred);
+                    // And start reading a new message if not quitting.
+                    if (!m_write_and_quit) {
+                        start_read_some();
+                        return true;
+                    }
+                    return false;
+                });
+            }
+
+            // The activation object needs to be reset before calling the completion handler
+            // (which might activate the same or another context).
+            // And reset load_last_operation before it.
+            load_last_operation.reset();
+            active_context.reset();
+            if (!result_continue || !*result_continue) {
+                // Operation complete either successfully or due to an error.
+                // We need to call the handler with the proper result type
+                this->complete(is_continuation,
+                               !result_continue ? leaf::result<void>{result_continue.error()} : leaf::result<void>{});
+            }
         }
 
         void start_read_some() {
@@ -213,12 +249,15 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         }
     };
 
+    // throw std::runtime_error{"initiation failed - 1"};
     auto initiation = [](auto &&completion_handler, AsyncStream *stream, DynamicReadBuffer *read_buffer,
                          DynamicWriteBuffer *write_buffer, ErrorContext *error_context) {
         internal_op op{*stream, *read_buffer, *write_buffer, *error_context,
                        std::forward<decltype(completion_handler)>(completion_handler)};
     };
 
+    // We are in the "initiation" part of the async operation.
+    [[maybe_unused]] auto load = leaf::preload(e_last_operation{"async_demo_rpc::initiation"});
     return net::async_initiate<CompletionToken, void(leaf::result<void>)>(initiation, token, &stream, &read_buffer,
                                                                           &write_buffer, &error_context);
 }
@@ -332,8 +371,8 @@ template <typename CharRange> leaf::result<std::pair<std::string, bool>> execute
     std::string response;
     bool quit = false;
 
-    // We need to compare the command (a boost::iterator_range of chars) against null terminated strings converted to
-    // std::string_view so they are proper ranges. We use the string_view literal for this conversion.
+    // We need to compare the command (a boost::iterator_range of chars) against null terminated strings converted
+    // to std::string_view so they are proper ranges. We use the string_view literal for this conversion.
     using namespace std::literals::string_view_literals;
     if (command == "quit"sv) {
         response = "quitting";
@@ -464,34 +503,52 @@ template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>
 } // namespace
 
 int main(int argc, char **argv) {
-    auto error_handler_impl = [&](leaf::verbose_diagnostic_info const &diag) -> int {
-        std::cout << "Error: " << diagnostic_to_str(diag) << std::endl;
-        return -1;
+    auto e_prefix = [](e_last_operation const *op) {
+        if (op != nullptr) {
+            return boost::str(boost::format("Error (%1%): ") % op->value);
+        }
+        return std::string("Error: ");
     };
 
+    // Error handler for internal server internal errors (not communicated to the remote client).
     auto error_handler = [&](leaf::error_info const &error) {
         return leaf::remote_handle_all(
             error,
-            [&](std::exception_ptr const &ep) {
+            [&](std::exception_ptr const &ep, e_last_operation const *op) {
                 return leaf::try_handle_all(
                     [&]() -> leaf::result<int> { std::rethrow_exception(ep); },
-                    [&](leaf::catch_<std::exception>, leaf::verbose_diagnostic_info const &diag) {
-                        return error_handler_impl(diag);
+                    [&](leaf::catch_<std::exception> e, leaf::verbose_diagnostic_info const &diag) {
+                        std::cerr << e_prefix(op) << e.value().what() << " (captured)" << diagnostic_to_str(diag)
+                                  << std::endl;
+                        return -11;
                     },
-                    [&](leaf::verbose_diagnostic_info const &diag) { return error_handler_impl(diag); });
+                    [&](leaf::verbose_diagnostic_info const &diag) {
+                        std::cerr << e_prefix(op) << "unknown (captured)" << diagnostic_to_str(diag) << std::endl;
+                        return -12;
+                    });
             },
-            [&](leaf::catch_<std::exception>, leaf::verbose_diagnostic_info const &diag) {
-                return error_handler_impl(diag);
+            [&](leaf::catch_<std::exception> e, e_last_operation const *op, leaf::verbose_diagnostic_info const &diag) {
+                std::cerr << e_prefix(op) << e.value().what() << diagnostic_to_str(diag) << std::endl;
+                return -21;
             },
-            [&](error_code const &, leaf::verbose_diagnostic_info const &diag) { return error_handler_impl(diag); },
-            [&](leaf::verbose_diagnostic_info const &diag) { return error_handler_impl(diag); });
+            [&](error_code ec, leaf::verbose_diagnostic_info const &diag, e_last_operation const *op) {
+                std::cerr << e_prefix(op) << ec << ":" << ec.message() << diagnostic_to_str(diag) << std::endl;
+                return -22;
+            },
+            [&](leaf::verbose_diagnostic_info const &diag, e_last_operation const *op) {
+                std::cerr << e_prefix(op) << "unknown" << diagnostic_to_str(diag) << std::endl;
+                return -23;
+            });
     };
+
+    auto error_context = leaf::make_context(&error_handler);
 
     // Top level try block and error handler.
     // It will handle errors from starting the server for example failure to bind to a given port
     // (e.g. ports less than 1024 if not running as root)
     return leaf::remote_try_handle_all(
         [&]() -> leaf::result<int> {
+            auto load = leaf::preload(e_last_operation{"main"});
             if (argc != 3) {
                 std::cerr << "Usage: " << argv[0] << " <address> <port>" << std::endl;
                 std::cerr << "Example:\n    " << argv[0] << " 0.0.0.0 8080" << std::endl;
@@ -519,7 +576,7 @@ int main(int argc, char **argv) {
             beast::flat_buffer write_buffer;
 
             int rv = 0;
-            auto error_context = leaf::make_context(&error_handler);
+
             async_demo_rpc(socket, read_buffer, write_buffer, error_context, [&](leaf::result<void> result) {
                 // Handle errors from running the server logic (e.g. client disconnecting abruptly)
                 leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
