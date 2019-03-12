@@ -161,6 +161,8 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
 
                 // Also, only as a continuation we preload the "continuation" operation
                 load_last_operation.emplace(leaf::preload(e_last_operation{"async_demo_rpc::continuation"}));
+            } else {
+                // throw std::runtime_error{"initiation failed - 3"};
             }
 
             if (ec) {
