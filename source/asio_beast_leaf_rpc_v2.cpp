@@ -576,7 +576,6 @@ int main(int argc, char **argv) {
             beast::flat_buffer write_buffer;
 
             int rv = 0;
-
             async_demo_rpc(socket, read_buffer, write_buffer, error_context, [&](leaf::result<void> result) {
                 // Handle errors from running the server logic (e.g. client disconnecting abruptly)
                 leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
