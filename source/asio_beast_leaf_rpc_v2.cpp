@@ -491,18 +491,6 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
     };
 }
 
-// A bare-bones on-scope-exit utility.
-template <typename F> struct [[nodiscard]] scope_exit {
-    explicit scope_exit(F && f) : m_f(std::move(f)) {}
-    scope_exit(scope_exit const &) = delete;
-    scope_exit(scope_exit &&) = delete;
-    scope_exit &operator=(scope_exit const &) = delete;
-    scope_exit &operator=(scope_exit &&) = delete;
-    ~scope_exit() { m_f(); }
-    F const m_f;
-};
-template <typename F> decltype(auto) on_scope_exit(F &&f) { return scope_exit<F>(std::forward<F>(f)); }
-
 } // namespace
 
 int main(int argc, char **argv) {
@@ -593,6 +581,7 @@ int main(int argc, char **argv) {
             });
             io_context.run();
 
+            // Let the remote side know we are shutting down.
             error_code ignored;
             socket.shutdown(net::ip::tcp::socket::shutdown_both, ignored);
             return rv;
