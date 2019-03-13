@@ -46,12 +46,14 @@ set(TESTS
     leaf_info_stack_test;
     #asio_beast_leaf_rpc;
     #asio_beast_leaf_rpc_v2;
+    #asio_beast_leaf_rpc_v3;
     )
 
 set(TESTS_NO_CLANG_TIDY
     asio_composed_one_flow_async_op;
     asio_beast_leaf_rpc;
-    asio_beast_leaf_rpc_v2)
+    asio_beast_leaf_rpc_v2;
+    asio_beast_leaf_rpc_v3)
 
 foreach(test_name ${TESTS})
     define_test_executable(${test_name} ${test_name}.cpp)
@@ -67,4 +69,5 @@ target_include_directories(leaf_context_activate_test SYSTEM PRIVATE tmp/include
 target_include_directories(leaf_info_stack_test SYSTEM PRIVATE tmp/include)
 target_include_directories(asio_beast_leaf_rpc SYSTEM PRIVATE tmp/include)
 target_include_directories(asio_beast_leaf_rpc_v2 SYSTEM PRIVATE tmp/include)
+target_include_directories(asio_beast_leaf_rpc_v3 SYSTEM PRIVATE tmp/include)
 
