@@ -345,7 +345,7 @@ response_t handle_request(request_t &&request) {
     };
 
     // In this variant of the RPC example we execute the remote command and handle any errors coming from it
-    // by creating a response to send back in one place (using `leaf::try_handle_all`).
+    // in one place (using `leaf::try_handle_all`).
     auto pair_status_response = leaf::try_handle_all(
         [&]() -> leaf::result<std::pair<http::status, std::string>> {
             if (request.method() != http::verb::post) {
