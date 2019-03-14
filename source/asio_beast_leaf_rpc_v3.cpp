@@ -85,7 +85,7 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
                     result_continue = leaf::exception_to_result([&]() -> leaf::result<bool> {
                         if (!m_data.response) {
                             // Process the request we received.
-                            m_data.response = handle_request(/*std::move*/ (m_data.parser->release()));
+                            m_data.response = handle_request(std::move(m_data.parser->release()));
                             m_write_and_quit = m_data.response->need_eof();
                             http::async_write(m_stream, *m_data.response, std::move(*this));
                             return true;
