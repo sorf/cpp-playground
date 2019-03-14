@@ -76,8 +76,10 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
                 leaf::context_activator active_context{m_error_context, leaf::on_deactivation::do_not_propagate};
                 auto load = leaf::preload(e_last_operation{m_data.response ? "async_demo_rpc::continuation-write"
                                                                            : "async_demo_rpc::continuation-read"});
-
-                if (ec) {
+                if (ec == http::error::end_of_stream) {
+                    // The remote side closed the connection.
+                    result_continue = false;
+                } else if (ec) {
                     result_continue = leaf::new_error(ec);
                 } else {
                     result_continue = leaf::exception_to_result([&]() -> leaf::result<bool> {
@@ -196,6 +198,11 @@ struct e_unexpected_arg_count {
 // The HTTP status that should be returned in case we get into an error.
 struct e_http_status {
     http::status value;
+};
+
+// Unexpected HTTP method.
+struct e_unexpected_http_method {
+    http::verb value;
 };
 
 // The E-type that describes the `error_quit` command as an error condition.
@@ -324,17 +331,70 @@ std::string diagnostic_to_str(leaf::verbose_diagnostic_info const &diag) {
 };
 
 response_t handle_request(request_t &&request) {
-    std::string response_body = leaf::try_handle_all(
-        [&]() -> leaf::result<std::string> { return execute_command(request.body()); },
-        [](leaf::catch_<std::exception>, leaf::verbose_diagnostic_info const &diag) { return diagnostic_to_str(diag); },
-        [](leaf::verbose_diagnostic_info const &diag) { return diagnostic_to_str(diag); });
-    response_body += "\n";
 
-    response_t response{http::status::ok, request.version()};
+    auto e_prefix = [](e_command const *cmd) {
+        if (cmd != nullptr) {
+            return boost::str(boost::format("Error (%1%):") % cmd->value);
+        }
+        return std::string("Error:");
+    };
+
+    auto make_sr = [](e_http_status const *status, std::string &&response) {
+        return std::make_pair(status != nullptr ? status->value : http::status::internal_server_error,
+                              std::move(response));
+    };
+
+    // In this variant of the RPC example we execute the remote command and handle any errors coming from it
+    // by creating a response to send back in one place (using `leaf::try_handle_all`).
+    auto pair_status_response = leaf::try_handle_all(
+        [&]() -> leaf::result<std::pair<http::status, std::string>> {
+            if (request.method() != http::verb::post) {
+                return leaf::new_error(e_unexpected_http_method{http::verb::post},
+                                       e_http_status{http::status::bad_request});
+            }
+            LEAF_AUTO(response, execute_command(request.body()));
+            return std::make_pair(http::status::ok, std::move(response));
+        },
+        // For the `error_quit` command and associated error condition we have the error handler itself fail
+        // (by throwing). This means that the server will not send any response to the client, it will just
+        // shutdown the connection.
+        // This implementation showcases two aspects:
+        // - that the implementation of error handling can fail, too
+        // - how the asynchronous operation calling this error handling function reacts to this failure.
+        [](e_error_quit const &) -> std::pair<http::status, std::string> { throw std::runtime_error("error_quit"); },
+        // For the rest of error conditions we just build a message to be sent to the remote client.
+        [&](e_parse_int64_error const &e, e_http_status const *status, e_command const *cmd,
+            leaf::verbose_diagnostic_info const &diag) {
+            return make_sr(status, boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) +
+                                       diagnostic_to_str(diag));
+        },
+        [&](e_unexpected_arg_count const &e, e_http_status const *status, e_command const *cmd,
+            leaf::verbose_diagnostic_info const &diag) {
+            return make_sr(status,
+                           boost::str(boost::format("%1% wrong argument count: %2%") % e_prefix(cmd) % e.value) +
+                               diagnostic_to_str(diag));
+        },
+        [&](e_unexpected_http_method const &e, e_http_status const *status, e_command const *cmd,
+            leaf::verbose_diagnostic_info const &diag) {
+            return make_sr(status, boost::str(boost::format("%1% unexpected HTTP method. Expected: %2%") %
+                                              e_prefix(cmd) % e.value) +
+                                       diagnostic_to_str(diag));
+        },
+        [&](leaf::catch_<std::exception> e, e_http_status const *status, e_command const *cmd,
+            leaf::verbose_diagnostic_info const &diag) {
+            return make_sr(status, boost::str(boost::format("%1% %2%") % e_prefix(cmd) % e.value().what()) +
+                                       diagnostic_to_str(diag));
+        },
+        [&](e_http_status const *status, e_command const *cmd, leaf::verbose_diagnostic_info const &diag) {
+            return make_sr(status,
+                           boost::str(boost::format("%1% unknown failure") % e_prefix(cmd)) + diagnostic_to_str(diag));
+        });
+    response_t response{pair_status_response.first, request.version()};
     response.set(http::field::server, "Example-with-" BOOST_BEAST_VERSION_STRING);
     response.set(http::field::content_type, "text/plain");
     response.keep_alive(request.keep_alive());
-    response.body() = response_body;
+    pair_status_response.second += "\n";
+    response.body() = std::move(pair_status_response.second);
     response.prepare_payload();
     return response;
 }
@@ -403,7 +463,7 @@ int main(int argc, char **argv) {
             auto local_endpoint = acceptor.local_endpoint();
             std::cout << "Server: Started on: " << local_endpoint << std::endl;
             std::cout << "Try in a different terminal:\n"
-                      << "    curl " << local_endpoint.address() << ":" << local_endpoint.port() << "\nor\n"
+                      << "    curl " << local_endpoint.address() << ":" << local_endpoint.port() << " -d \"\"\nor\n"
                       << "    curl " << local_endpoint.address() << ":" << local_endpoint.port() << " -d \"sum 1 2 3\""
                       << std::endl;
 
