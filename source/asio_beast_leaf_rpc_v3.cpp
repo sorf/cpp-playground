@@ -438,8 +438,6 @@ int main(int argc, char **argv) {
             });
     };
 
-    auto error_context = leaf::make_context(&error_handler);
-
     // Top level try block and error handler.
     // It will handle errors from starting the server for example failure to bind to a given port
     // (e.g. ports less than 1024 if not running as root)
@@ -470,6 +468,8 @@ int main(int argc, char **argv) {
             auto socket = acceptor.accept();
             std::cout << "Server: Client connected: " << socket.remote_endpoint() << std::endl;
 
+            // The error context for the async operation.
+            auto error_context = leaf::make_context(&error_handler);
             int rv = 0;
             async_demo_rpc(socket, error_context, [&](leaf::result<void> result) {
                 // Note: In case we wanted to add some additional information to the error associated with the result
