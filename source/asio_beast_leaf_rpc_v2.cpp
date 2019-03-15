@@ -156,8 +156,9 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
 
             if (is_continuation) {
                 // We activate the error-context only as a continuation (when this method is not called directly from
-                // the initiation function). Otherwise (during initiation) we let the caller's error context be
-                // associated with any error that might occur below.
+                // the initiation function). This is because if we are on the initiation path we don't know whether the
+                // caller hasn't already activated the error-context.
+                // Note: An error context cannot be activated twice
                 active_context.emplace(m_error_context, leaf::on_deactivation::do_not_propagate);
 
                 // Also, only as a continuation we preload the "continuation" operation
@@ -220,9 +221,11 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                 });
             }
 
-            // The activation object needs to be reset before calling the completion handler
-            // (which might activate the same or another context).
-            // And reset load_last_operation before it.
+            // The activation object and load_last_operation need to be reset before calling the completion handler
+            // This is because the completion handler may be called directly or posted and if posted, it could
+            // execute in other thread. This means, that regardless of how the handler gets to be actually called
+            // we must ensure that it is not called with the error context active
+            // Note: An error context cannot be activated twice
             load_last_operation.reset();
             active_context.reset();
             if (!result_continue || !*result_continue) {
@@ -568,12 +571,16 @@ int main(int argc, char **argv) {
 
             int rv = 0;
             async_demo_rpc(socket, read_buffer, write_buffer, error_context, [&](leaf::result<void> result) {
-                // Handle errors from running the server logic (e.g. client disconnecting abruptly)
-                leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
+                // Note: In case we wanted to add some additional infomration to the error associated with the result
+                // we would need to activate the error-context
+                // In this example this is not the case, so the next line is commented out.
+                // leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
+
                 if (result) {
                     std::cout << "Server: Client work completed successfully" << std::endl;
                     rv = 0;
                 } else {
+                    // Handle errors from running the server logic (e.g. client disconnecting abruptly)
                     leaf::result<int> result_int{result.error()};
                     rv = error_context.remote_handle_all(
                         result_int, [&](leaf::error_info const &error) { return error_handler(error); });
