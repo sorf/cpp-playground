@@ -535,8 +535,6 @@ int main(int argc, char **argv) {
             });
     };
 
-    auto error_context = leaf::make_context(&error_handler);
-
     // Top level try block and error handler.
     // It will handle errors from starting the server for example failure to bind to a given port
     // (e.g. ports less than 1024 if not running as root)
@@ -569,6 +567,8 @@ int main(int argc, char **argv) {
             beast::multi_buffer read_buffer; // or beast::flat_buffer read_buffer;
             beast::flat_buffer write_buffer;
 
+            // The error context for the async operation.
+            auto error_context = leaf::make_context(&error_handler);
             int rv = 0;
             async_demo_rpc(socket, read_buffer, write_buffer, error_context, [&](leaf::result<void> result) {
                 // Note: In case we wanted to add some additional information to the error associated with the result
