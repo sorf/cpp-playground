@@ -571,7 +571,7 @@ int main(int argc, char **argv) {
 
             int rv = 0;
             async_demo_rpc(socket, read_buffer, write_buffer, error_context, [&](leaf::result<void> result) {
-                // Note: In case we wanted to add some additional infomration to the error associated with the result
+                // Note: In case we wanted to add some additional information to the error associated with the result
                 // we would need to activate the error-context
                 // In this example this is not the case, so the next line is commented out.
                 // leaf::context_activator active_context(error_context, leaf::on_deactivation::do_not_propagate);
