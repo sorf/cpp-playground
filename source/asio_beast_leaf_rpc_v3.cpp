@@ -1,3 +1,22 @@
+// Example of a composed asynchronous operation which uses the LEAF library for error handling and reporting.
+//
+// Examples of running:
+// - in one terminal (re)run: ./asio_beast_leaf_rpc_v3 0.0.0.0 8080
+// - in another run:
+//      curl localhost:8080 -v -d "sum 0 1 2 3"
+//   generating errors returned to the client:
+//      curl localhost:8080 -v -X DELETE -d ""
+//      curl localhost:8080 -v -d "mul 1 2x3"
+//      curl localhost:8080 -v -d "div 1 0"
+//      curl localhost:8080 -v -d "mod 1"
+//
+// Runs that showcase the error handling on the server side:
+//  - error starting the server:
+//      ./asio_beast_leaf_rpc_v3 0.0.0.0 80
+//  - error while running the server logic:
+//      ./asio_beast_leaf_rpc_v3 0.0.0.0 8080
+//      curl localhost:8080 -v -d "error-quit"
+//
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -42,6 +61,30 @@ using response_t = http::response<http::string_body>;
 
 response_t handle_request(request_t &&request);
 
+// A composed asynchronous operation that implements a basic remote calculator over HTTP.
+// It receives from the remote side commands such as:
+//      sum 1 2 3
+//      div 3 2
+//      mod 1 0
+// in the body of POST requests and sends back the result.
+//
+// Besides the calculator related commands, it also offer a special command:
+// - `error_quit` that asks the server to simulate a server side error that leads to the connection being dropped
+// .
+//
+// From the error handling perspective there are three parts of the implementation:
+// - the handling of an HTTP request and creating the response to send back
+//      (see handle_request)
+// - the parsing and execution of the remote command we received as the body of an an HTTP POST request
+//      (see execute_command())
+// - this composed asynchronous operation which calls them
+// .
+//
+// This example operation is based on:
+// - https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/echo-op/echo_op.cpp#L1
+// - part of
+// https://github.com/boostorg/beast/blob/b02f59ff9126c5a17f816852efbbd0ed20305930/example/advanced/server/advanced_server.cpp#L1
+//
 template <class AsyncStream, typename ErrorContext, typename CompletionToken>
 auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, CompletionToken &&token) ->
     typename net::async_result<typename std::decay<CompletionToken>::type, void(leaf::result<void>)>::return_type {
@@ -71,18 +114,18 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
         }
 
         void operator()(error_code ec, std::size_t /*bytes_transferred*/ = 0) {
-            leaf::result<bool> result_continue;
+            leaf::result<bool> result_continue_execution;
             {
                 leaf::context_activator active_context{m_error_context, leaf::on_deactivation::do_not_propagate};
                 auto load = leaf::preload(e_last_operation{m_data.response ? "async_demo_rpc::continuation-write"
                                                                            : "async_demo_rpc::continuation-read"});
                 if (ec == http::error::end_of_stream) {
                     // The remote side closed the connection.
-                    result_continue = false;
+                    result_continue_execution = false;
                 } else if (ec) {
-                    result_continue = leaf::new_error(ec);
+                    result_continue_execution = leaf::new_error(ec);
                 } else {
-                    result_continue = leaf::exception_to_result([&]() -> leaf::result<bool> {
+                    result_continue_execution = leaf::exception_to_result([&]() -> leaf::result<bool> {
                         if (!m_data.response) {
                             // Process the request we received.
                             m_data.response = handle_request(std::move(m_data.parser->release()));
@@ -93,21 +136,28 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
 
                         // If getting here, we completed a write operation.
                         m_data.response.reset();
-                        // And start reading a new message if not quitting.
+                        // And start reading a new message if not quitting
+                        // (i.e. the message semantics of the last response we sent required an end of file)
                         if (!m_write_and_quit) {
                             start_read_request();
                             return true;
                         }
+
+                        // We didn't initiate any new async operation above, so we will not continue the execution.
                         return false;
                     });
                 }
                 // The activation object and load_last_operation need to be reset before calling the completion handler
+                // This is because, in general, the completion handler may be called directly or posted and if posted,
+                // it could execute in other thread. This means, that regardless of how the handler gets to be actually
+                // called we must ensure that it is not called with the error context active.
+                // Note: An error context cannot be activated twice
             }
-            if (!result_continue || !*result_continue) {
-                // Operation complete either successfully or due to an error.
-                // We need to call the handler with the proper result type
-                this->complete_now(!result_continue ? leaf::result<void>{result_continue.error()}
-                                                    : leaf::result<void>{});
+            if (!result_continue_execution || !*result_continue_execution) {
+                // As we don't continue the execution either due to an error or because the flag was set to false,
+                // we need to call the handler with the proper result type
+                this->complete_now(!result_continue_execution ? leaf::result<void>{result_continue_execution.error()}
+                                                              : leaf::result<void>{});
             }
         }
 
@@ -330,6 +380,7 @@ std::string diagnostic_to_str(leaf::verbose_diagnostic_info const &diag) {
     return "\nDetailed error diagnostic:\n----\n" + str + "\n----";
 };
 
+// Handles an HTTP request and returns the response to send back.
 response_t handle_request(request_t &&request) {
 
     auto e_prefix = [](e_command const *cmd) {
@@ -458,11 +509,16 @@ int main(int argc, char **argv) {
 
             // Start the server acceptor and wait for a client.
             net::ip::tcp::acceptor acceptor{io_context, endpoint};
+
             auto local_endpoint = acceptor.local_endpoint();
+            auto address_try_msg = acceptor.local_endpoint().address().to_string();
+            if (address_try_msg == "0.0.0.0") {
+                address_try_msg = "localhost";
+            }
             std::cout << "Server: Started on: " << local_endpoint << std::endl;
             std::cout << "Try in a different terminal:\n"
-                      << "    curl " << local_endpoint.address() << ":" << local_endpoint.port() << " -d \"\"\nor\n"
-                      << "    curl " << local_endpoint.address() << ":" << local_endpoint.port() << " -d \"sum 1 2 3\""
+                      << "    curl " << address_try_msg << ":" << local_endpoint.port() << " -d \"\"\nor\n"
+                      << "    curl " << address_try_msg << ":" << local_endpoint.port() << " -d \"sum 1 2 3\""
                       << std::endl;
 
             auto socket = acceptor.accept();
