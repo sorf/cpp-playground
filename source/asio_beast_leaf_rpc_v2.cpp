@@ -150,7 +150,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         }
 
         void operator()(error_code ec, std::size_t bytes_transferred = 0, bool is_continuation = true) {
-            leaf::result<bool> result_continue;
+            leaf::result<bool> result_continue_execution;
             std::optional<leaf::context_activator> active_context;
             std::optional<preload_last_operation_t> load_last_operation;
 
@@ -168,9 +168,9 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
             }
 
             if (ec) {
-                result_continue = leaf::new_error(ec);
+                result_continue_execution = leaf::new_error(ec);
             } else {
-                result_continue = leaf::exception_to_result([&]() -> leaf::result<bool> {
+                result_continue_execution = leaf::exception_to_result([&]() -> leaf::result<bool> {
                     if (m_write_buffer.size() == 0) {
                         // We read something.
                         m_read_buffer.commit(bytes_transferred);
@@ -217,6 +217,8 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                         start_read_some();
                         return true;
                     }
+
+                    // We didn't initiate any new async operation above, so we will not continue the execution.
                     return false;
                 });
             }
@@ -228,11 +230,12 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
             // Note: An error context cannot be activated twice
             load_last_operation.reset();
             active_context.reset();
-            if (!result_continue || !*result_continue) {
-                // Operation complete either successfully or due to an error.
-                // We need to call the handler with the proper result type
-                this->complete(is_continuation,
-                               !result_continue ? leaf::result<void>{result_continue.error()} : leaf::result<void>{});
+            if (!result_continue_execution || !*result_continue_execution) {
+                // As we don't continue the execution either due to an error or because the flag was set to false,
+                // we need to call the handler with the proper result type
+                this->complete(is_continuation, !result_continue_execution
+                                                    ? leaf::result<void>{result_continue_execution.error()}
+                                                    : leaf::result<void>{});
             }
         }
 
