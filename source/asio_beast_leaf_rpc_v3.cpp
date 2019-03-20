@@ -149,15 +149,16 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
                 }
                 // The activation object and load_last_operation need to be reset before calling the completion handler
                 // This is because, in general, the completion handler may be called directly or posted and if posted,
-                // it could execute in other thread. This means, that regardless of how the handler gets to be actually
+                // it could execute in another thread. This means that regardless of how the handler gets to be actually
                 // called we must ensure that it is not called with the error context active.
                 // Note: An error context cannot be activated twice
             }
-            if (!result_continue_execution || !*result_continue_execution) {
-                // As we don't continue the execution either due to an error or because the flag was set to false,
-                // we need to call the handler with the proper result type
-                this->complete_now(!result_continue_execution ? leaf::result<void>{result_continue_execution.error()}
-                                                              : leaf::result<void>{});
+            if (!result_continue_execution) {
+                // We don't continue the execution due to an error, calling the completion handler
+                this->complete_now(result_continue_execution.error());
+            } else {
+                // We don't continue the execution due to the flag not being set, calling the completion handler
+                this->complete_now(leaf::result<void>{});
             }
         }
 
@@ -383,7 +384,7 @@ std::string diagnostic_to_str(leaf::verbose_diagnostic_info const &diag) {
 // Handles an HTTP request and returns the response to send back.
 response_t handle_request(request_t &&request) {
 
-    auto e_prefix = [](e_command const *cmd) {
+    auto msg_prefix = [](e_command const *cmd) {
         if (cmd != nullptr) {
             return boost::str(boost::format("Error (%1%):") % cmd->value);
         }
@@ -416,29 +417,29 @@ response_t handle_request(request_t &&request) {
         // For the rest of error conditions we just build a message to be sent to the remote client.
         [&](e_parse_int64_error const &e, e_http_status const *status, e_command const *cmd,
             leaf::verbose_diagnostic_info const &diag) {
-            return make_sr(status, boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) +
+            return make_sr(status, boost::str(boost::format("%1% int64 parse error: %2%") % msg_prefix(cmd) % e.value) +
                                        diagnostic_to_str(diag));
         },
         [&](e_unexpected_arg_count const &e, e_http_status const *status, e_command const *cmd,
             leaf::verbose_diagnostic_info const &diag) {
             return make_sr(status,
-                           boost::str(boost::format("%1% wrong argument count: %2%") % e_prefix(cmd) % e.value) +
+                           boost::str(boost::format("%1% wrong argument count: %2%") % msg_prefix(cmd) % e.value) +
                                diagnostic_to_str(diag));
         },
         [&](e_unexpected_http_method const &e, e_http_status const *status, e_command const *cmd,
             leaf::verbose_diagnostic_info const &diag) {
             return make_sr(status, boost::str(boost::format("%1% unexpected HTTP method. Expected: %2%") %
-                                              e_prefix(cmd) % e.value) +
+                                              msg_prefix(cmd) % e.value) +
                                        diagnostic_to_str(diag));
         },
         [&](leaf::catch_<std::exception> e, e_http_status const *status, e_command const *cmd,
             leaf::verbose_diagnostic_info const &diag) {
-            return make_sr(status, boost::str(boost::format("%1% %2%") % e_prefix(cmd) % e.value().what()) +
+            return make_sr(status, boost::str(boost::format("%1% %2%") % msg_prefix(cmd) % e.value().what()) +
                                        diagnostic_to_str(diag));
         },
         [&](e_http_status const *status, e_command const *cmd, leaf::verbose_diagnostic_info const &diag) {
-            return make_sr(status,
-                           boost::str(boost::format("%1% unknown failure") % e_prefix(cmd)) + diagnostic_to_str(diag));
+            return make_sr(status, boost::str(boost::format("%1% unknown failure") % msg_prefix(cmd)) +
+                                       diagnostic_to_str(diag));
         });
     response_t response{pair_status_response.first, request.version()};
     response.set(http::field::server, "Example-with-" BOOST_BEAST_VERSION_STRING);
@@ -451,7 +452,7 @@ response_t handle_request(request_t &&request) {
 }
 
 int main(int argc, char **argv) {
-    auto e_prefix = [](e_last_operation const *op) {
+    auto msg_prefix = [](e_last_operation const *op) {
         if (op != nullptr) {
             return boost::str(boost::format("Error (%1%): ") % op->value);
         }
@@ -466,25 +467,25 @@ int main(int argc, char **argv) {
                 return leaf::try_handle_all(
                     [&]() -> leaf::result<int> { std::rethrow_exception(ep); },
                     [&](leaf::catch_<std::exception> e, leaf::verbose_diagnostic_info const &diag) {
-                        std::cerr << e_prefix(op) << e.value().what() << " (captured)" << diagnostic_to_str(diag)
+                        std::cerr << msg_prefix(op) << e.value().what() << " (captured)" << diagnostic_to_str(diag)
                                   << std::endl;
                         return -11;
                     },
                     [&](leaf::verbose_diagnostic_info const &diag) {
-                        std::cerr << e_prefix(op) << "unknown (captured)" << diagnostic_to_str(diag) << std::endl;
+                        std::cerr << msg_prefix(op) << "unknown (captured)" << diagnostic_to_str(diag) << std::endl;
                         return -12;
                     });
             },
             [&](leaf::catch_<std::exception> e, e_last_operation const *op, leaf::verbose_diagnostic_info const &diag) {
-                std::cerr << e_prefix(op) << e.value().what() << diagnostic_to_str(diag) << std::endl;
+                std::cerr << msg_prefix(op) << e.value().what() << diagnostic_to_str(diag) << std::endl;
                 return -21;
             },
             [&](error_code ec, leaf::verbose_diagnostic_info const &diag, e_last_operation const *op) {
-                std::cerr << e_prefix(op) << ec << ":" << ec.message() << diagnostic_to_str(diag) << std::endl;
+                std::cerr << msg_prefix(op) << ec << ":" << ec.message() << diagnostic_to_str(diag) << std::endl;
                 return -22;
             },
             [&](leaf::verbose_diagnostic_info const &diag, e_last_operation const *op) {
-                std::cerr << e_prefix(op) << "unknown" << diagnostic_to_str(diag) << std::endl;
+                std::cerr << msg_prefix(op) << "unknown" << diagnostic_to_str(diag) << std::endl;
                 return -23;
             });
     };

@@ -375,7 +375,7 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
     using e_command_r = e_command<CharRange>;
     using e_parse_int64_error_r = e_parse_int64_error<CharRange>;
 
-    auto e_prefix = [](e_command_r const *cmd) {
+    auto msg_prefix = [](e_command_r const *cmd) {
         if (cmd != nullptr) {
             return boost::str(boost::format("Error (%1%):") % cmd->value);
         }
@@ -387,7 +387,7 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
         return "\nDetailed error diagnostic:\n----\n" + str + "\n----";
     };
 
-    return [e_prefix, diag_s](leaf::error_info const &error) {
+    return [msg_prefix, diag_s](leaf::error_info const &error) {
         return leaf::remote_handle_all(
             error,
             // For the `error_quit` command and associated error condition we have the error handler itself fail
@@ -399,17 +399,18 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
             [](e_error_quit const &) -> std::string { throw std::runtime_error("error_quit"); },
             // For the rest of error conditions we just build a message to be sent to the remote client.
             [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) + diag_s(diag);
+                return boost::str(boost::format("%1% int64 parse error: %2%") % msg_prefix(cmd) % e.value) +
+                       diag_s(diag);
             },
             [&](e_unexpected_arg_count const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% wrong argument count: %2%") % e_prefix(cmd) % e.value) +
+                return boost::str(boost::format("%1% wrong argument count: %2%") % msg_prefix(cmd) % e.value) +
                        diag_s(diag);
             },
             [&](leaf::catch_<std::exception> e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% %2%") % e_prefix(cmd) % e.value().what()) + diag_s(diag);
+                return boost::str(boost::format("%1% %2%") % msg_prefix(cmd) % e.value().what()) + diag_s(diag);
             },
             [&](e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% unknown failure") % e_prefix(cmd)) + diag_s(diag);
+                return boost::str(boost::format("%1% unknown failure") % msg_prefix(cmd)) + diag_s(diag);
             });
     };
 }

@@ -459,14 +459,14 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
     using e_command_r = e_command<CharRange>;
     using e_parse_int64_error_r = e_parse_int64_error<CharRange>;
 
-    auto e_prefix = [](e_command_r const *cmd) {
+    auto msg_prefix = [](e_command_r const *cmd) {
         if (cmd != nullptr) {
             return boost::str(boost::format("Error (%1%):") % cmd->value);
         }
         return std::string("Error:");
     };
 
-    return [e_prefix](leaf::error_info const &error) {
+    return [msg_prefix](leaf::error_info const &error) {
         return leaf::remote_handle_all(
             error,
             // For the `error_quit` command and associated error condition we have the error handler itself fail
@@ -478,19 +478,19 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
             [](e_error_quit const &) -> std::string { throw std::runtime_error("error_quit"); },
             // For the rest of error conditions we just build a message to be sent to the remote client.
             [&](e_parse_int64_error_r const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% int64 parse error: %2%") % e_prefix(cmd) % e.value) +
+                return boost::str(boost::format("%1% int64 parse error: %2%") % msg_prefix(cmd) % e.value) +
                        diagnostic_to_str(diag);
             },
             [&](e_unexpected_arg_count const &e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% wrong argument count: %2%") % e_prefix(cmd) % e.value) +
+                return boost::str(boost::format("%1% wrong argument count: %2%") % msg_prefix(cmd) % e.value) +
                        diagnostic_to_str(diag);
             },
             [&](leaf::catch_<std::exception> e, e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% %2%") % e_prefix(cmd) % e.value().what()) +
+                return boost::str(boost::format("%1% %2%") % msg_prefix(cmd) % e.value().what()) +
                        diagnostic_to_str(diag);
             },
             [&](e_command_r const *cmd, leaf::verbose_diagnostic_info const &diag) {
-                return boost::str(boost::format("%1% unknown failure") % e_prefix(cmd)) + diagnostic_to_str(diag);
+                return boost::str(boost::format("%1% unknown failure") % msg_prefix(cmd)) + diagnostic_to_str(diag);
             });
     };
 }
@@ -498,7 +498,7 @@ template <typename CharRange> decltype(auto) make_execute_command_error_handler_
 } // namespace
 
 int main(int argc, char **argv) {
-    auto e_prefix = [](e_last_operation const *op) {
+    auto msg_prefix = [](e_last_operation const *op) {
         if (op != nullptr) {
             return boost::str(boost::format("Error (%1%): ") % op->value);
         }
@@ -513,25 +513,25 @@ int main(int argc, char **argv) {
                 return leaf::try_handle_all(
                     [&]() -> leaf::result<int> { std::rethrow_exception(ep); },
                     [&](leaf::catch_<std::exception> e, leaf::verbose_diagnostic_info const &diag) {
-                        std::cerr << e_prefix(op) << e.value().what() << " (captured)" << diagnostic_to_str(diag)
+                        std::cerr << msg_prefix(op) << e.value().what() << " (captured)" << diagnostic_to_str(diag)
                                   << std::endl;
                         return -11;
                     },
                     [&](leaf::verbose_diagnostic_info const &diag) {
-                        std::cerr << e_prefix(op) << "unknown (captured)" << diagnostic_to_str(diag) << std::endl;
+                        std::cerr << msg_prefix(op) << "unknown (captured)" << diagnostic_to_str(diag) << std::endl;
                         return -12;
                     });
             },
             [&](leaf::catch_<std::exception> e, e_last_operation const *op, leaf::verbose_diagnostic_info const &diag) {
-                std::cerr << e_prefix(op) << e.value().what() << diagnostic_to_str(diag) << std::endl;
+                std::cerr << msg_prefix(op) << e.value().what() << diagnostic_to_str(diag) << std::endl;
                 return -21;
             },
             [&](error_code ec, leaf::verbose_diagnostic_info const &diag, e_last_operation const *op) {
-                std::cerr << e_prefix(op) << ec << ":" << ec.message() << diagnostic_to_str(diag) << std::endl;
+                std::cerr << msg_prefix(op) << ec << ":" << ec.message() << diagnostic_to_str(diag) << std::endl;
                 return -22;
             },
             [&](leaf::verbose_diagnostic_info const &diag, e_last_operation const *op) {
-                std::cerr << e_prefix(op) << "unknown" << diagnostic_to_str(diag) << std::endl;
+                std::cerr << msg_prefix(op) << "unknown" << diagnostic_to_str(diag) << std::endl;
                 return -23;
             });
     };
