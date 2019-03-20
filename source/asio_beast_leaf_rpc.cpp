@@ -98,13 +98,14 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
         DynamicWriteBuffer &m_write_buffer;
         execute_error_handler_t m_execute_error_handler;
         bool m_write_and_quit;
+        std::size_t m_find_newline_start_pos;
 
         internal_op(AsyncStream &stream, DynamicReadBuffer &read_buffer, DynamicWriteBuffer &write_buffer,
                     handler_type &&handler)
             : base_type{std::move(handler), stream.get_executor()}, m_stream{stream}, m_read_buffer{read_buffer},
               m_write_buffer{write_buffer},
-              m_execute_error_handler{make_execute_command_error_handler_all<read_buffers_range>()}, m_write_and_quit{
-                                                                                                         false} {
+              m_execute_error_handler{make_execute_command_error_handler_all<read_buffers_range>()},
+              m_write_and_quit{false}, m_find_newline_start_pos{} {
 
             // Simulating that we received an empty line so that we send the "help" message as soon as a client connects
             using mutable_iterator = net::buffers_iterator<typename DynamicReadBuffer::mutable_buffers_type>;
@@ -121,16 +122,23 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                 if (m_write_buffer.size() == 0) {
                     // We read something.
                     m_read_buffer.commit(bytes_transferred);
-                    std::size_t pos_nl = find_newline(m_read_buffer.data());
-                    if (pos_nl == 0) {
+
+                    auto read_buffers = m_read_buffer.data();
+                    auto it_begin = read_buffers_iterator::begin(read_buffers);
+                    auto it_end = read_buffers_iterator::end(read_buffers);
+                    auto it_nl = std::find(it_begin + m_find_newline_start_pos, it_end, '\n');
+                    if (it_nl == it_end) {
+                        m_find_newline_start_pos = it_end - it_begin;
                         // Read some more until we get a newline
                         return start_read_some();
                     }
+                    // Include the newline we searched for.
+                    ++it_nl;
+                    // Next time we'll search for newline from the beginning of the read buffer.
+                    m_find_newline_start_pos = 0;
 
                     // Process the line we received.
-                    auto line_begin = read_buffers_iterator::begin(m_read_buffer.data());
-                    auto line_end = line_begin + pos_nl;
-                    read_buffers_range line{line_begin, line_end};
+                    read_buffers_range line{it_begin, it_nl};
                     std::string response = leaf::remote_try_handle_all(
                         [line, this]() -> leaf::result<std::string> {
                             LEAF_AUTO(pair_response_quit, execute_command(line));
@@ -139,7 +147,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
                         },
                         [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
                     // After processing and/or error handling we can consume the read buffer.
-                    m_read_buffer.consume(pos_nl);
+                    m_read_buffer.consume(it_nl - it_begin);
 
                     // Prepare the response buffer
                     // (including fixing the newlines to be '\r\n' for remote telnet clients)
@@ -170,18 +178,6 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
             std::size_t bytes_to_read = 3; // A small value for testing purposes
                                            // (multiple `operator()` calls for most messages)
             m_stream.async_read_some(m_read_buffer.prepare(bytes_to_read), std::move(*this));
-        }
-
-        // Same as:
-        // https://github.com/boostorg/beast/blob/c82237512a95487fd67a4287f79f4458ba978f43/example/echo-op/echo_op.cpp#L199
-        static std::size_t find_newline(read_buffers_type const &buffers) {
-            auto begin = read_buffers_iterator::begin(buffers);
-            auto end = read_buffers_iterator::end(buffers);
-            auto result = std::find(begin, end, '\n');
-            if (result == end) {
-                return 0;
-            }
-            return result + 1 - begin;
         }
     };
 
