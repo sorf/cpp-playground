@@ -233,9 +233,7 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
             if (!result_continue_execution || !*result_continue_execution) {
                 // As we don't continue the execution either due to an error or because the flag was set to false,
                 // we need to call the handler with the proper result type
-                this->complete(is_continuation, !result_continue_execution
-                                                    ? leaf::result<void>{result_continue_execution.error()}
-                                                    : leaf::result<void>{});
+                this->complete(is_continuation, leaf::result<void>{result_continue_execution.error()});
             }
         }
 
