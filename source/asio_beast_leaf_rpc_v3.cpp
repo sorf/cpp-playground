@@ -156,7 +156,7 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
             if (!result_continue_execution) {
                 // We don't continue the execution due to an error, calling the completion handler
                 this->complete_now(result_continue_execution.error());
-            } else {
+            } else if( !*result_continue_execution ) {
                 // We don't continue the execution due to the flag not being set, calling the completion handler
                 this->complete_now(leaf::result<void>{});
             }
