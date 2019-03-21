@@ -238,10 +238,12 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
             // Note: An error context cannot be activated twice
             load_last_operation.reset();
             active_context.reset();
-            if (!result_continue_execution || !*result_continue_execution) {
-                // As we don't continue the execution either due to an error or because the flag was set to false,
-                // we need to call the handler with the proper result type
-                this->complete(is_continuation, leaf::result<void>{result_continue_execution.error()});
+            if (!result_continue_execution) {
+                // We don't continue the execution due to an error, calling the completion handler
+                this->complete_now(result_continue_execution.error());
+            } else if( !*result_continue_execution ) {
+                // We don't continue the execution due to the flag not being set, calling the completion handler
+                this->complete_now(leaf::result<void>{});
             }
         }
 
