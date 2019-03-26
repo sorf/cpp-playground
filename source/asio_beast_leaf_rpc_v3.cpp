@@ -117,8 +117,8 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
             leaf::result<bool> result_continue_execution;
             {
                 leaf::context_activator active_context{m_error_context, leaf::on_deactivation::do_not_propagate};
-                auto load = leaf::preload(e_last_operation{m_data.response ? "async_demo_rpc::continuation-write"
-                                                                           : "async_demo_rpc::continuation-read"});
+                auto load_last_operation = leaf::preload(e_last_operation{
+                    m_data.response ? "async_demo_rpc::continuation-write" : "async_demo_rpc::continuation-read"});
                 if (ec == http::error::end_of_stream) {
                     // The remote side closed the connection.
                     result_continue_execution = false;
@@ -151,12 +151,11 @@ auto async_demo_rpc(AsyncStream &stream, ErrorContext &error_context, Completion
                 // This is because, in general, the completion handler may be called directly or posted and if posted,
                 // it could execute in another thread. This means that regardless of how the handler gets to be actually
                 // called we must ensure that it is not called with the error context active.
-                // Note: An error context cannot be activated twice
             }
             if (!result_continue_execution) {
                 // We don't continue the execution due to an error, calling the completion handler
                 this->complete_now(result_continue_execution.error());
-            } else if( !*result_continue_execution ) {
+            } else if (!*result_continue_execution) {
                 // We don't continue the execution due to the flag not being set, calling the completion handler
                 this->complete_now(leaf::result<void>{});
             }

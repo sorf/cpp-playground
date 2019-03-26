@@ -152,96 +152,89 @@ auto async_demo_rpc(AsyncStream &stream, DynamicReadBuffer &read_buffer, Dynamic
 
         void operator()(error_code ec, std::size_t bytes_transferred = 0, bool is_continuation = true) {
             leaf::result<bool> result_continue_execution;
-            std::optional<leaf::context_activator> active_context;
-            std::optional<preload_last_operation_t> load_last_operation;
+            {
+                // Creating a `context_activator` is no-op if the context is already active on the initiation path.
+                leaf::context_activator active_context{m_error_context, leaf::on_deactivation::do_not_propagate};
+                std::optional<preload_last_operation_t> load_last_operation;
+                if (is_continuation) {
+                    load_last_operation.emplace(leaf::preload(e_last_operation{"async_demo_rpc::continuation"}));
+                } else {
+                    // throw std::runtime_error{"initiation failed - 3"};
+                }
 
-            if (is_continuation) {
-                // We activate the error-context only as a continuation (when this method is not called directly from
-                // the initiation function). This is because if we are on the initiation path we don't know whether the
-                // caller hasn't already activated the error-context.
-                // Note: An error context cannot be activated twice
-                active_context.emplace(m_error_context, leaf::on_deactivation::do_not_propagate);
+                if (ec) {
+                    result_continue_execution = leaf::new_error(ec);
+                } else {
+                    result_continue_execution = leaf::exception_to_result([&]() -> leaf::result<bool> {
+                        if (m_write_buffer.size() == 0) {
+                            // We read something.
+                            m_read_buffer.commit(bytes_transferred);
 
-                // Also, only as a continuation we preload the "continuation" operation
-                load_last_operation.emplace(leaf::preload(e_last_operation{"async_demo_rpc::continuation"}));
-            } else {
-                // throw std::runtime_error{"initiation failed - 3"};
-            }
+                            auto read_buffers = m_read_buffer.data();
+                            auto it_begin = read_buffers_iterator::begin(read_buffers);
+                            auto it_end = read_buffers_iterator::end(read_buffers);
+                            auto it_nl = std::find(it_begin + m_find_newline_start_pos, it_end, '\n');
+                            if (it_nl == it_end) {
+                                m_find_newline_start_pos = it_end - it_begin;
+                                // Read some more until we get a newline
+                                start_read_some();
+                                return true;
+                            }
+                            // Include the newline we searched for.
+                            ++it_nl;
+                            // Next time we'll search for newline from the beginning of the read buffer.
+                            m_find_newline_start_pos = 0;
 
-            if (ec) {
-                result_continue_execution = leaf::new_error(ec);
-            } else {
-                result_continue_execution = leaf::exception_to_result([&]() -> leaf::result<bool> {
-                    if (m_write_buffer.size() == 0) {
-                        // We read something.
-                        m_read_buffer.commit(bytes_transferred);
+                            // Process the line we received.
+                            read_buffers_range line{it_begin, it_nl};
+                            std::string response = leaf::remote_try_handle_all(
+                                [line, this]() -> leaf::result<std::string> {
+                                    LEAF_AUTO(pair_response_quit, execute_command(line));
+                                    m_write_and_quit = pair_response_quit.second;
+                                    return std::move(pair_response_quit.first);
+                                },
+                                [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
+                            // After processing and/or error handling we can consume the read buffer.
+                            m_read_buffer.consume(it_nl - it_begin);
 
-                        auto read_buffers = m_read_buffer.data();
-                        auto it_begin = read_buffers_iterator::begin(read_buffers);
-                        auto it_end = read_buffers_iterator::end(read_buffers);
-                        auto it_nl = std::find(it_begin + m_find_newline_start_pos, it_end, '\n');
-                        if (it_nl == it_end) {
-                            m_find_newline_start_pos = it_end - it_begin;
-                            // Read some more until we get a newline
+                            // Prepare the response buffer
+                            // (including fixing the newlines to be '\r\n' for remote telnet clients)
+                            response.push_back('\n');
+                            boost::algorithm::erase_all(response, "\r");
+                            boost::algorithm::replace_all(response, "\n", "\r\n");
+
+                            std::size_t write_size = response.size();
+                            auto response_buffers = m_write_buffer.prepare(write_size);
+                            std::copy(response.begin(), response.end(),
+                                      write_buffers_iterator::begin(response_buffers));
+                            m_write_buffer.commit(write_size);
+                            net::async_write(m_stream, response_buffers, std::move(*this));
+                            return true;
+                        }
+
+                        // If getting here, we completed a write operation.
+                        assert(m_write_buffer.size() == bytes_transferred);
+                        m_write_buffer.consume(bytes_transferred);
+                        // And start reading a new message if not quitting.
+                        if (!m_write_and_quit) {
                             start_read_some();
                             return true;
                         }
-                        // Include the newline we searched for.
-                        ++it_nl;
-                        // Next time we'll search for newline from the beginning of the read buffer.
-                        m_find_newline_start_pos = 0;
 
-                        // Process the line we received.
-                        read_buffers_range line{it_begin, it_nl};
-                        std::string response = leaf::remote_try_handle_all(
-                            [line, this]() -> leaf::result<std::string> {
-                                LEAF_AUTO(pair_response_quit, execute_command(line));
-                                m_write_and_quit = pair_response_quit.second;
-                                return std::move(pair_response_quit.first);
-                            },
-                            [&](leaf::error_info const &error) { return m_execute_error_handler(error); });
-                        // After processing and/or error handling we can consume the read buffer.
-                        m_read_buffer.consume(it_nl - it_begin);
+                        // We didn't initiate any new async operation above, so we will not continue the execution.
+                        return false;
+                    });
+                }
 
-                        // Prepare the response buffer
-                        // (including fixing the newlines to be '\r\n' for remote telnet clients)
-                        response.push_back('\n');
-                        boost::algorithm::erase_all(response, "\r");
-                        boost::algorithm::replace_all(response, "\n", "\r\n");
-
-                        std::size_t write_size = response.size();
-                        auto response_buffers = m_write_buffer.prepare(write_size);
-                        std::copy(response.begin(), response.end(), write_buffers_iterator::begin(response_buffers));
-                        m_write_buffer.commit(write_size);
-                        net::async_write(m_stream, response_buffers, std::move(*this));
-                        return true;
-                    }
-
-                    // If getting here, we completed a write operation.
-                    assert(m_write_buffer.size() == bytes_transferred);
-                    m_write_buffer.consume(bytes_transferred);
-                    // And start reading a new message if not quitting.
-                    if (!m_write_and_quit) {
-                        start_read_some();
-                        return true;
-                    }
-
-                    // We didn't initiate any new async operation above, so we will not continue the execution.
-                    return false;
-                });
+                // The activation object and load_last_operation need to be reset before calling the completion handler
+                // This is because the completion handler may be called directly or posted and if posted, it could
+                // execute in other thread. This means, that regardless of how the handler gets to be actually called
+                // we must ensure that it is not called with the error context active
             }
-
-            // The activation object and load_last_operation need to be reset before calling the completion handler
-            // This is because the completion handler may be called directly or posted and if posted, it could
-            // execute in other thread. This means, that regardless of how the handler gets to be actually called
-            // we must ensure that it is not called with the error context active
-            // Note: An error context cannot be activated twice
-            load_last_operation.reset();
-            active_context.reset();
             if (!result_continue_execution) {
                 // We don't continue the execution due to an error, calling the completion handler
                 this->complete_now(result_continue_execution.error());
-            } else if( !*result_continue_execution ) {
+            } else if (!*result_continue_execution) {
                 // We don't continue the execution due to the flag not being set, calling the completion handler
                 this->complete_now(leaf::result<void>{});
             }
